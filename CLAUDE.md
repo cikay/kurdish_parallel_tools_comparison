@@ -91,8 +91,12 @@ and bertalign). SONAR is the replacement but is **CC-BY-NC** (non-commercial).
 Local (pipenv — pulls torch locally, uses Apple MPS):
 ```bash
 pipenv install
-pipenv run python -m kurdish_parallel.align --n 3   # kmr_Latn -> tur_Latn
+pipenv run python -m kurdish_parallel.align --n 3   # kmr_Latn -> every other language
 ```
+- CLI args: `--subset`, `--tool`, `--embed`, `--n`, `--verbose`. Source is fixed
+  (`SRC_LANG = kmr_Latn`) and every other summary language (`TARGET_LANGS`) is a
+  target; device is always `resolve_device("auto")`. (No `--src/--tgt/--device/
+  --out` — removed; outputs always go to `results/`.)
 
 Modal smoke test (recommended; no local torch, runs on a GPU, both pairs):
 ```bash
@@ -101,15 +105,21 @@ modal run modal_app/app.py --n 3
 - One `local_entrypoint` (`main`), so no `::name` needed.
 - Source/targets are **fixed** in the app (`SRC_LANG`, `TARGET_LANGS`); the CLI
   only takes `--n`, `--gpu`, `--device`.
-- `modal` lives in the user's project virtualenvs, not on the system Python.
-  One known path: `~/.local/share/virtualenvs/sorjin-modal-ZLvY6A0z/bin/modal`.
-  The Modal token is at `~/.modal.toml` (already configured).
+- `modal` lives in the user's project virtualenvs, not on the system Python
+  (Homebrew Python blocks `pip install` via PEP 668). It is installed in THIS
+  project's pipenv venv (`kurdish_parallel-*`), so `modal run …` works with the
+  venv active. Another copy is at
+  `~/.local/share/virtualenvs/sorjin-modal-ZLvY6A0z/bin/modal`. Token at
+  `~/.modal.toml` (already configured).
 
 ## Conventions
 
 - Output files go in `results/`.
-  - Local CLI: `{tool}_{embed}_{src}_{tgt}_{n}.jsonl`, or `…_full.jsonl` when
-    `--n` is omitted.
+  - Local CLI: `{tool}_{embed}_{n}.jsonl`, or `{tool}_{embed}_full.jsonl` when
+    `--n` is omitted. Source is fixed (kmr_Latn) and all targets go in one file,
+    so src/tgt are no longer in the name. NOTE: the `…_full.jsonl` form matches
+    the Modal full name — local covers all `TARGET_LANGS`, Modal only tur+eng, so
+    don't mix them in the same `results/`.
   - Modal smoke test: `{tool}_{embed}_smoke_{n}.jsonl` when `--n` > 0, else
     `{tool}_{embed}_full.jsonl` (one record per thesis-and-target). `--n 0` /
     omitted means the full subset. (`embed` is in the name so vecalign/labse and

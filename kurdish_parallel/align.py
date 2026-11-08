@@ -18,9 +18,10 @@ callers (``import kurdish_parallel.align as A``) keep working:
     * tools.tools      - align_bertalign, align_vecalign, align_pair (+ TOOLS)
     * tools.embeddings - labse/sonar embed fns, score_pairs (+ EMBEDS)
 
-Usage (inside the pipenv shell):
-    pipenv run python align.py --n 3
-    pipenv run python align.py --src kmr_Latn --tgt eng_Latn --n 5 --verbose
+Source is always kmr_Latn; every other summary language present in a row is a
+target (null ones are skipped). Run as a module inside the pipenv shell:
+    pipenv run python -m kurdish_parallel.align --n 3
+    pipenv run python -m kurdish_parallel.align --tool vecalign --embed sonar --n 5 --verbose
 """
 
 from __future__ import annotations
@@ -59,6 +60,14 @@ SPLITTER_LANG = {
     "eng_Latn": "en",   # English
     # ckb_Arab / *_Arab handled by a regex fallback (no splitter model).
 }
+
+# Fixed CLI pairing: Kurmanji is the source, every OTHER summary language is a
+# target. Rows missing a given abstract are skipped for that target.
+SRC_LANG = "kmr_Latn"
+TARGET_LANGS = ("zza_Latn", "ckb_Arab", "tur_Latn", "eng_Latn")
+
+# Local outputs live in results/ (repo root is the package's parent).
+RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
 
 def resolve_device(requested: str) -> str:
@@ -122,10 +131,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--subset", default="kmr_Latn",
                         help="Which parquet subset to read (default: kmr_Latn).")
-    parser.add_argument("--src", default="kmr_Latn",
-                        help="Source summary language key (default: kmr_Latn).")
-    parser.add_argument("--tgt", default="tur_Latn",
-                        help="Target summary language key (default: tur_Latn).")
     parser.add_argument("--tool", default="bertalign", choices=TOOLS,
                         help="Alignment tool to use (default: bertalign).")
     parser.add_argument("--embed", default="labse", choices=EMBEDS,
@@ -133,12 +138,6 @@ def main() -> None:
                              "bertalign is LaBSE-only.")
     parser.add_argument("--n", type=int, default=None,
                         help="How many theses to align; omit for the full subset.")
-    parser.add_argument("--device", default="auto",
-                        choices=["auto", "mps", "cuda", "cpu"],
-                        help="Torch device (default: auto -> MPS on Apple Silicon).")
-    parser.add_argument("--out", default=None,
-                        help="Output JSONL path (default: {tool}_{embed}_{src}_"
-                             "{tgt}_{n|full}.jsonl).")
     parser.add_argument("--verbose", action="store_true",
                         help="Show Bertalign's INFO logging.")
     args = parser.parse_args()
@@ -151,7 +150,7 @@ def main() -> None:
     if args.tool == "bertalign" and args.embed != "labse":
         parser.error("bertalign only supports --embed labse")
 
-    device = resolve_device(args.device)
+    device = resolve_device("auto")
     print(f"Device: {device} | tool: {args.tool} | embed: {args.embed}")
 
     # LaBSE is always needed as the neutral scorer (and as the embed model for
@@ -173,68 +172,81 @@ def main() -> None:
     df = load_rows(args.subset)
 
     suffix = str(args.n) if args.n else "full"
-    out_path = Path(
-        args.out
-        or f"{args.tool}_{args.embed}_{args.src}_{args.tgt}_{suffix}.jsonl"
-    )
-    written = 0
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = RESULTS_DIR / f"{args.tool}_{args.embed}_{suffix}.jsonl"
+
+    theses_done = 0
+    records_written = 0
     with out_path.open("w", encoding="utf-8") as fh:
         for _, row in df.iterrows():
-            if args.n and written >= args.n:
+            if args.n and theses_done >= args.n:
                 break
-            src_text = get_summary(row, args.src)
-            tgt_text = get_summary(row, args.tgt)
-            if not src_text or not tgt_text:
+            src_text = get_summary(row, SRC_LANG)
+            if not src_text:
                 continue
-
-            src_sents = split_sentences(src_text, args.src)
-            tgt_sents = split_sentences(tgt_text, args.tgt)
-            if not src_sents or not tgt_sents:
+            src_sents = split_sentences(src_text, SRC_LANG)
+            if not src_sents:
                 continue
 
             tez_id = row.get("tez_id")
             title = row.get("title")
+            aligned_any = False
 
-            t1 = time.perf_counter()
-            pairs = align_pair(args.tool, args.embed, labse_model, src_sents,
-                               tgt_sents, args.src, args.tgt,
-                               device=device, bert_encoder=bert_encoder)
-            scores = score_pairs(labse_model, pairs)
-            dt = time.perf_counter() - t1
-            matched = [s for s in scores if s is not None]
-            mean_score = round(sum(matched) / len(matched), 4) if matched else None
+            # Kurmanji against every other summary language available in this row.
+            for tgt in TARGET_LANGS:
+                tgt_text = get_summary(row, tgt)
+                if not tgt_text:
+                    continue
+                tgt_sents = split_sentences(tgt_text, tgt)
+                if not tgt_sents:
+                    continue
 
-            print(f"=== tez_id={tez_id} | {args.tool}/{args.embed} | "
-                  f"{args.src}->{args.tgt} | "
-                  f"{len(src_sents)}->{len(tgt_sents)} sents | "
-                  f"{len(pairs)} beads | mean cos={mean_score} | {dt:.2f}s ===")
-            # Print every bead only for a small smoke run; stay quiet for full runs.
-            if args.n:
-                print(f"    {title}")
-                for (src_line, tgt_line), score in zip(pairs, scores):
-                    tag = f"{score:.3f}" if score is not None else "  -  "
-                    print(f"  [{tag}] [{args.src}] {src_line}")
-                    print(f"          [{args.tgt}] {tgt_line}")
-                    print()
+                t1 = time.perf_counter()
+                pairs = align_pair(args.tool, args.embed, labse_model, src_sents,
+                                   tgt_sents, SRC_LANG, tgt,
+                                   device=device, bert_encoder=bert_encoder)
+                scores = score_pairs(labse_model, pairs)
+                dt = time.perf_counter() - t1
+                matched = [s for s in scores if s is not None]
+                mean_score = round(sum(matched) / len(matched), 4) if matched else None
 
-            record = {
-                "tez_id": tez_id,
-                "title": title,
-                "tool": args.tool,
-                "embed": args.embed,
-                "src_lang": args.src,
-                "tgt_lang": args.tgt,
-                "n_src_sents": len(src_sents),
-                "n_tgt_sents": len(tgt_sents),
-                "align_seconds": round(dt, 3),
-                "mean_score": mean_score,
-                "pairs": [{"src": s, "tgt": t, "score": sc}
-                          for (s, t), sc in zip(pairs, scores)],
-            }
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-            written += 1
+                print(f"=== tez_id={tez_id} | {args.tool}/{args.embed} | "
+                      f"{SRC_LANG}->{tgt} | "
+                      f"{len(src_sents)}->{len(tgt_sents)} sents | "
+                      f"{len(pairs)} beads | mean cos={mean_score} | {dt:.2f}s ===")
+                # Print every bead only for a small smoke run; quiet for full runs.
+                if args.n:
+                    print(f"    {title}")
+                    for (src_line, tgt_line), score in zip(pairs, scores):
+                        tag = f"{score:.3f}" if score is not None else "  -  "
+                        print(f"  [{tag}] [{SRC_LANG}] {src_line}")
+                        print(f"          [{tgt}] {tgt_line}")
+                        print()
 
-    print(f"Wrote {written} aligned theses to {out_path.resolve()}")
+                record = {
+                    "tez_id": tez_id,
+                    "title": title,
+                    "tool": args.tool,
+                    "embed": args.embed,
+                    "src_lang": SRC_LANG,
+                    "tgt_lang": tgt,
+                    "n_src_sents": len(src_sents),
+                    "n_tgt_sents": len(tgt_sents),
+                    "align_seconds": round(dt, 3),
+                    "mean_score": mean_score,
+                    "pairs": [{"src": s, "tgt": t, "score": sc}
+                              for (s, t), sc in zip(pairs, scores)],
+                }
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                records_written += 1
+                aligned_any = True
+
+            if aligned_any:
+                theses_done += 1
+
+    print(f"Wrote {records_written} records "
+          f"({theses_done} theses x up to {len(TARGET_LANGS)} targets) "
+          f"to {out_path.resolve()}")
 
 
 if __name__ == "__main__":

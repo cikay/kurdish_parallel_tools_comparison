@@ -93,18 +93,21 @@ abstract pair.
 
 ## Run it locally (pipenv)
 
+Source is always `kmr_Latn`; every other summary language present in a row
+(`zza_Latn`, `ckb_Arab`, `tur_Latn`, `eng_Latn`) is aligned as a target.
+
 ```bash
 pipenv install                                            # one-time (pulls torch etc.)
-pipenv run python -m kurdish_parallel.align --n 3                         # bertalign/labse, kmr -> tur
+pipenv run python -m kurdish_parallel.align --n 3                         # bertalign/labse, 3 theses
 pipenv run python -m kurdish_parallel.align --tool vecalign --embed sonar --n 3  # vecalign/SONAR (needs sonar-space)
-pipenv run python -m kurdish_parallel.align --src kmr_Latn --tgt eng_Latn --n 3
-pipenv run python -m kurdish_parallel.align --src kmr_Latn --tgt eng_Latn  # omit --n for full
+pipenv run python -m kurdish_parallel.align --tool vecalign --n 3         # vecalign/labse
+pipenv run python -m kurdish_parallel.align                               # omit --n for the full subset
 ```
 
-On Apple Silicon the script auto-selects the **MPS** (Metal) device; the first
-line of output prints `Device: … | tool: … | embed: …`. Default output name is
-`{tool}_{embed}_{src}_{tgt}_{n}.jsonl`, or `…_full.jsonl` when `--n` is omitted
-(override with `--out`).
+On Apple Silicon the device is auto-selected as **MPS** (Metal); the first line
+of output prints `Device: … | tool: … | embed: …`. Output goes to
+`results/{tool}_{embed}_{n}.jsonl` when `--n` is given, else
+`results/{tool}_{embed}_full.jsonl` — one record per thesis-and-target.
 
 ### Local timing (Apple M3, 16 GB, MPS)
 
