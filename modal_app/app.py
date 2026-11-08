@@ -1,22 +1,27 @@
 """
-Modal smoke test for Bertalign on the kurdish-theses-yok summaries.
+Modal smoke test for sentence alignment on the kurdish-theses-yok summaries.
 
-It aligns Kurmanji against BOTH Turkish and English, on the same theses (those
-that carry all three abstracts), so you can eyeball both pairs from one run. It
-reuses the local ``align.py`` logic (shipped into the image) and runs on a cheap
-GPU, so there is no multi-GB torch install on your Mac. The LaBSE model and the
-dataset parquet are cached on a Modal Volume, so only the first run pays the
-download cost.
+Aligns Kurmanji against BOTH Turkish and English, on the same theses (those that
+carry all three abstracts), with a selectable tool and embedding model. Reuses
+the local ``align.py`` logic (shipped into each image). LaBSE scores every pair
+(a neutral yardstick), so all tool/embed combos are comparable.
+
+Two images, because the dependency stacks don't mix:
+  * labse_image  - bertalign (needs Python>=3.12) + vecalign; LaBSE embeddings.
+  * sonar_image  - vecalign + SONAR (fairseq2); no bertalign. LaBSE loaded via
+                   sentence-transformers for scoring only.
 
     # one entry point -> no ::name needed
-    modal run modal_app/app.py                 # 3 theses, T4
-    modal run modal_app/app.py --n 5           # 5 theses
-    modal run modal_app/app.py --gpu L4 --n 10 # bigger GPU
-    modal run modal_app/app.py --gpu none      # CPU only
+    modal run modal_app/app.py                              # bertalign/labse
+    modal run modal_app/app.py --tool vecalign              # vecalign/labse
+    modal run modal_app/app.py --tool vecalign --embed sonar  # vecalign/SONAR
+    modal run modal_app/app.py --n 50                      # smoke on 50 theses
+    modal run modal_app/app.py --tool vecalign --embed sonar --n 0  # FULL subset
+    modal run modal_app/app.py --gpu L4 --n 10
 
-Both pairs print to your terminal and are saved to results/smoke_{n}.jsonl
-(one record per thesis-and-target). Requires modal installed and authenticated
-locally (you already use Modal).
+Output: results/{tool}_{embed}_smoke_{n}.jsonl when --n > 0, else
+results/{tool}_{embed}_full.jsonl. One record per thesis-and-target, with
+aligned `pairs`, per-bead cosine `score`, and `mean_score`.
 """
 
 import json
@@ -35,40 +40,82 @@ TARGET_LANGS = ["tur_Latn", "eng_Latn"]
 SUBSET = "kmr_Latn"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LOCAL_ALIGN = REPO_ROOT / "align.py"
-REMOTE_ALIGN_DIR = "/root/src"
+LOCAL_PKG = REPO_ROOT / "kurdish_parallel"  # the code package (align + tools/)
+REMOTE_SRC_DIR = "/root/src"  # put on sys.path; package lands at src/kurdish_parallel
 
 app = modal.App(APP_NAME)
 
 cache_volume = modal.Volume.from_name(CACHE_VOLUME_NAME, create_if_missing=True)
 
-image = (
-    modal.Image.debian_slim(python_version="3.12")
+# Vecalign builds a Cython extension -> needs a C compiler and git.
+_base = modal.Image.debian_slim(python_version="3.12").apt_install("build-essential", "git")
+
+# LaBSE stack: bertalign (pulls sentence-transformers + torch) + vecalign.
+labse_image = (
+    _base.pip_install("bertalign==2.0.1", "pandas", "pyarrow", "huggingface-hub")
+    .pip_install("git+https://github.com/thompsonb/vecalign.git@main")
+    .env({"HF_HOME": f"{CACHE_PATH}/huggingface"})
+    .add_local_dir(str(LOCAL_PKG), f"{REMOTE_SRC_DIR}/kurdish_parallel")
+)
+
+# SONAR stack: vecalign + sonar-space (fairseq2) + sentence-transformers (for the
+# LaBSE scorer only). No bertalign (keeping it out avoids transformers/torch
+# fights with fairseq2). The whole stack is PINNED to a self-consistent set,
+# because the free resolver backtracks to a broken sonar-space (no fairseq2):
+#   fairseq2n 0.8.1 -> torch==2.9.1, numpy~=2.2
+#   fairseq2  0.8.1 -> transformers~=4.57
+#   sentence-transformers 3.2.1 accepts transformers 4.57 and torch 2.9
+# NOTE: XDG_CACHE_HOME (SONAR/fairseq2 asset cache) is set at RUNTIME in
+# _run_alignment, not here: setting it at build time makes pip cache into
+# /cache, and Modal then refuses to mount the volume on a non-empty /cache.
+sonar_image = (
+    _base.apt_install("libsndfile1", "sox")
     .pip_install(
-        "bertalign==2.0.1",
+        "torch==2.9.1",
+        "numpy~=2.2",
+        "transformers~=4.57.0",
+        "sentence-transformers==3.2.1",
+        "fairseq2n==0.8.1",
+        "fairseq2==0.8.1",
+        "sonar-space==0.5.0",
+        "huggingface-hub~=0.32",
+        "sentence-splitter",  # align.py:split_sentences (bertalign provides it in the other image)
         "pandas",
         "pyarrow",
-        "huggingface-hub",
     )
-    # Cache Hugging Face downloads (LaBSE model + dataset parquet) on the volume.
+    .pip_install("git+https://github.com/thompsonb/vecalign.git@main")
     .env({"HF_HOME": f"{CACHE_PATH}/huggingface"})
-    # Ship the local align.py so the remote logic is identical to the local one.
-    .add_local_file(str(LOCAL_ALIGN), f"{REMOTE_ALIGN_DIR}/align.py")
+    .add_local_dir(str(LOCAL_PKG), f"{REMOTE_SRC_DIR}/kurdish_parallel")
 )
 
 
-@app.function(image=image, volumes={CACHE_PATH: cache_volume}, timeout=30 * 60)
-def align_remote(src: str, targets: list[str], subset: str, n: int, device: str) -> dict:
+def _run_alignment(subset: str, src: str, targets: list[str], n: int,
+                   device: str, tool: str, embed: str) -> dict:
+    """Shared remote body: load models, align every thesis, score with LaBSE."""
+    import os
     import sys
 
-    sys.path.insert(0, REMOTE_ALIGN_DIR)
-    import align as A  # the shipped local module
-    from bertalign import Bertalign, Encoder
+    # Point SONAR / fairseq2 (and any ~/.cache users) at the volume AT RUNTIME.
+    # Must not be a build-time env var, or pip caches into /cache and the volume
+    # mount fails. Harmless for the LaBSE image.
+    os.environ.setdefault("XDG_CACHE_HOME", f"{CACHE_PATH}/xdg")
+
+    sys.path.insert(0, REMOTE_SRC_DIR)
+    import kurdish_parallel.align as A  # the shipped local package
 
     dev = A.resolve_device(device)  # "auto" -> cuda when a GPU is attached
 
     t0 = time.perf_counter()
-    encoder = Encoder("LaBSE", device=dev)
+    bert_encoder = None
+    if tool == "bertalign":
+        from bertalign import Encoder
+
+        bert_encoder = Encoder("LaBSE", device=dev)
+        labse_model = bert_encoder.model
+    else:
+        from sentence_transformers import SentenceTransformer
+
+        labse_model = SentenceTransformer("LaBSE", device=dev)
     load_seconds = time.perf_counter() - t0
 
     df = A.load_rows(subset)
@@ -76,12 +123,10 @@ def align_remote(src: str, targets: list[str], subset: str, n: int, device: str)
     results = []
     theses_done = 0
     for _, row in df.iterrows():
-        if theses_done >= n:
+        if n and theses_done >= n:  # n == 0 means "full subset".
             break
         src_text = A.get_summary(row, src)
         target_texts = {t: A.get_summary(row, t) for t in targets}
-        # Only use theses that have the source and ALL targets, so both pairs
-        # cover the same documents.
         if not src_text or any(not v for v in target_texts.values()):
             continue
         src_sents = A.split_sentences(src_text, src)
@@ -94,69 +139,88 @@ def align_remote(src: str, targets: list[str], subset: str, n: int, device: str)
                 continue
 
             t1 = time.perf_counter()
-            aligner = Bertalign(
-                "\n".join(src_sents),
-                "\n".join(tgt_sents),
-                is_split=True,
-                model=encoder,
-            )
-            aligner.align_sents()
-            pairs = aligner.sent_pairs()
-            scores = A.score_pairs(encoder, pairs)
+            pairs = A.align_pair(tool, embed, labse_model, src_sents, tgt_sents,
+                                 src, tgt, device=dev, bert_encoder=bert_encoder)
+            scores = A.score_pairs(labse_model, pairs)
             align_seconds = time.perf_counter() - t1
             matched = [s for s in scores if s is not None]
             mean_score = round(sum(matched) / len(matched), 4) if matched else None
 
-            results.append(
-                {
-                    "tez_id": row.get("tez_id"),
-                    "title": row.get("title"),
-                    "src_lang": src,
-                    "tgt_lang": tgt,
-                    "n_src_sents": len(src_sents),
-                    "n_tgt_sents": len(tgt_sents),
-                    "align_seconds": round(align_seconds, 3),
-                    "mean_score": mean_score,
-                    "pairs": [{"src": s, "tgt": t, "score": sc}
-                              for (s, t), sc in zip(pairs, scores)],
-                }
-            )
+            results.append({
+                "tez_id": row.get("tez_id"),
+                "title": row.get("title"),
+                "tool": tool,
+                "embed": embed,
+                "src_lang": src,
+                "tgt_lang": tgt,
+                "n_src_sents": len(src_sents),
+                "n_tgt_sents": len(tgt_sents),
+                "align_seconds": round(align_seconds, 3),
+                "mean_score": mean_score,
+                "pairs": [{"src": s, "tgt": t, "score": sc}
+                          for (s, t), sc in zip(pairs, scores)],
+            })
         theses_done += 1
 
-    # Persist the HF cache (model + parquet) so the next run is fast.
-    cache_volume.commit()
-
+    cache_volume.commit()  # persist HF / SONAR caches for fast reruns
     return {
         "device": dev,
+        "tool": tool,
+        "embed": embed,
         "model_load_seconds": round(load_seconds, 2),
         "n_theses": theses_done,
         "records": results,
     }
 
 
-@app.local_entrypoint()
-def main(n: int = 3, gpu: str = "T4", device: str = "auto"):
-    gpu_option = None if gpu.lower() in {"none", "cpu", ""} else gpu
-    out = align_remote.with_options(gpu=gpu_option).remote(
-        SRC_LANG, TARGET_LANGS, SUBSET, n, device
-    )
+@app.function(image=labse_image, volumes={CACHE_PATH: cache_volume}, timeout=60 * 60)
+def align_labse_remote(src, targets, subset, n, device, tool) -> dict:
+    return _run_alignment(subset, src, targets, n, device, tool, "labse")
 
-    print(f"\nDevice: {out['device']} | LaBSE load: {out['model_load_seconds']}s "
-          f"| GPU: {gpu_option or 'cpu'} | theses: {out['n_theses']}\n")
+
+@app.function(image=sonar_image, volumes={CACHE_PATH: cache_volume}, timeout=60 * 60)
+def align_sonar_remote(src, targets, subset, n, device) -> dict:
+    return _run_alignment(subset, src, targets, n, device, "vecalign", "sonar")
+
+
+@app.local_entrypoint()
+def main(n: int = 0, tool: str = "bertalign", embed: str = "labse",
+         gpu: str = "T4", device: str = "auto"):
+    if tool not in ("bertalign", "vecalign"):
+        raise ValueError("tool must be 'bertalign' or 'vecalign'")
+    if embed not in ("labse", "sonar"):
+        raise ValueError("embed must be 'labse' or 'sonar'")
+    if tool == "bertalign" and embed != "labse":
+        raise ValueError("bertalign only supports --embed labse")
+
+    gpu_option = None if gpu.lower() in {"none", "cpu", ""} else gpu
+    if embed == "sonar":
+        fn = align_sonar_remote.with_options(gpu=gpu_option)
+        out = fn.remote(SRC_LANG, TARGET_LANGS, SUBSET, n, device)
+    else:
+        fn = align_labse_remote.with_options(gpu=gpu_option)
+        out = fn.remote(SRC_LANG, TARGET_LANGS, SUBSET, n, device, tool)
+
+    print(f"\nTool: {out['tool']}/{out['embed']} | Device: {out['device']} | "
+          f"model load: {out['model_load_seconds']}s | GPU: {gpu_option or 'cpu'} | "
+          f"theses: {out['n_theses']}\n")
     for record in out["records"]:
-        print(f"=== tez_id={record['tez_id']} | {record['src_lang']}->{record['tgt_lang']} | "
+        print(f"=== tez_id={record['tez_id']} | {record['tool']}/{record['embed']} | "
+              f"{record['src_lang']}->{record['tgt_lang']} | "
               f"{record['n_src_sents']}->{record['n_tgt_sents']} sents | "
               f"{len(record['pairs'])} beads | mean cos={record['mean_score']} | "
               f"{record['align_seconds']}s ===")
-        print(f"    {record['title']}")
-        for pair in record["pairs"]:
-            score = pair["score"]
-            tag = f"{score:.3f}" if score is not None else "  -  "
-            print(f"  [{tag}] [{record['src_lang']}] {pair['src']}")
-            print(f"          [{record['tgt_lang']}] {pair['tgt']}")
-            print()
+        if n:  # print every bead only for a small smoke run
+            print(f"    {record['title']}")
+            for pair in record["pairs"]:
+                score = pair["score"]
+                tag = f"{score:.3f}" if score is not None else "  -  "
+                print(f"  [{tag}] [{record['src_lang']}] {pair['src']}")
+                print(f"          [{record['tgt_lang']}] {pair['tgt']}")
+                print()
 
-    out_path = REPO_ROOT / "results" / f"smoke_{n}.jsonl"
+    stem = f"{tool}_{embed}_smoke_{n}" if n else f"{tool}_{embed}_full"
+    out_path = REPO_ROOT / "results" / f"{stem}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as fh:
         for record in out["records"]:

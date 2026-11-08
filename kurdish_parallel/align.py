@@ -1,17 +1,22 @@
 #!/usr/bin/env python
-"""Align parallel sentences from the kurdish-theses-yok summaries with Bertalign.
+"""Align parallel sentences from the kurdish-theses-yok summaries.
 
 The dataset stores abstracts in a ``summaries`` struct with one key per
 language (kmr_Latn, zza_Latn, ckb_Arab, tur_Latn, eng_Latn); any key may be
 null. This script pairs two of those languages, splits each abstract into
-sentences, and aligns them with Bertalign (LaBSE embeddings).
+sentences, and aligns them with the selected tool/embedding.
 
-Why we pre-split and pass is_split=True: Bertalign's bundled language detector
-and sentence splitter only know ~25 European languages, so Kurdish would be
-mislabelled and mis-split. LaBSE itself is multilingual and embeds Kurdish
-fine, so we do the segmentation ourselves (Turkish splitter as a proxy for the
-Latin-script Kurdish variants) and let Bertalign do only the embedding + DP
-alignment.
+Why we pre-split and pass is_split=True (Bertalign): its bundled language
+detector and sentence splitter only know ~25 European languages, so Kurdish
+would be mislabelled and mis-split. LaBSE itself is multilingual and embeds
+Kurdish fine, so we do the segmentation ourselves (Turkish splitter as a proxy
+for the Latin-script Kurdish variants) and let the tool do only the alignment.
+
+This module is the data + CLI layer. The alignment algorithms and embedding
+models live in the ``tools`` package and are re-exported below so existing
+callers (``import kurdish_parallel.align as A``) keep working:
+    * tools.tools      - align_bertalign, align_vecalign, align_pair (+ TOOLS)
+    * tools.embeddings - labse/sonar embed fns, score_pairs (+ EMBEDS)
 
 Usage (inside the pipenv shell):
     pipenv run python align.py --n 3
@@ -26,6 +31,21 @@ import logging
 import re
 import time
 from pathlib import Path
+
+# Re-exported so ``import kurdish_parallel.align as A`` still exposes the aligners/scorer that
+# now live in the tools package (used by modal_app/app.py and the local CLI).
+from .tools.embeddings import (  # noqa: F401
+    EMBEDS,
+    labse_embed_fn,
+    score_pairs,
+    sonar_embed_fn,
+)
+from .tools.tools import (  # noqa: F401
+    TOOLS,
+    align_bertalign,
+    align_pair,
+    align_vecalign,
+)
 
 REPO_ID = "muzaffercky/kurdish-theses-yok"
 
@@ -72,41 +92,6 @@ def split_sentences(text: str, key: str) -> list[str]:
     return [s.strip() for s in splitter.split(text) if s.strip()]
 
 
-def score_pairs(encoder, pairs: list[tuple[str, str]]) -> list[float | None]:
-    """Cosine similarity for each aligned bead.
-
-    Bertalign discards the per-bead score it computes internally, so we recover
-    an interpretable one: re-encode each bead's joined source and target segment
-    with L2 normalization and take the dot product (= cosine, in [-1, 1];
-    good matches are typically ~0.6-0.95). Insertion/deletion beads (one side
-    empty) have no counterpart, so their score is None.
-
-    Args:
-        encoder: A bertalign ``Encoder`` (``encoder.model`` is the
-            SentenceTransformer); reuse the same one the aligner used.
-        pairs: The ``aligner.sent_pairs()`` output.
-
-    Returns:
-        One score (or None) per bead, aligned with ``pairs``.
-    """
-    import numpy as np
-
-    scores: list[float | None] = [None] * len(pairs)
-    srcs, tgts, idxs = [], [], []
-    for i, (src, tgt) in enumerate(pairs):
-        if src.strip() and tgt.strip():
-            srcs.append(src)
-            tgts.append(tgt)
-            idxs.append(i)
-    if srcs:
-        src_vecs = encoder.model.encode(srcs, normalize_embeddings=True)
-        tgt_vecs = encoder.model.encode(tgts, normalize_embeddings=True)
-        cos = (np.asarray(src_vecs) * np.asarray(tgt_vecs)).sum(axis=1)
-        for j, i in enumerate(idxs):
-            scores[i] = round(float(cos[j]), 4)
-    return scores
-
-
 def load_rows(subset: str):
     """Download the subset parquet from the Hub and return it as a DataFrame."""
     import pandas as pd
@@ -141,13 +126,19 @@ def main() -> None:
                         help="Source summary language key (default: kmr_Latn).")
     parser.add_argument("--tgt", default="tur_Latn",
                         help="Target summary language key (default: tur_Latn).")
-    parser.add_argument("--n", type=int, default=3,
-                        help="How many theses to align (default: 3).")
+    parser.add_argument("--tool", default="bertalign", choices=TOOLS,
+                        help="Alignment tool to use (default: bertalign).")
+    parser.add_argument("--embed", default="labse", choices=EMBEDS,
+                        help="Vecalign embedding model (default: labse). "
+                             "bertalign is LaBSE-only.")
+    parser.add_argument("--n", type=int, default=None,
+                        help="How many theses to align; omit for the full subset.")
     parser.add_argument("--device", default="auto",
                         choices=["auto", "mps", "cuda", "cpu"],
                         help="Torch device (default: auto -> MPS on Apple Silicon).")
     parser.add_argument("--out", default=None,
-                        help="Output JSONL path (default: {src}_{tgt}_{n}.jsonl).")
+                        help="Output JSONL path (default: {tool}_{embed}_{src}_"
+                             "{tgt}_{n|full}.jsonl).")
     parser.add_argument("--verbose", action="store_true",
                         help="Show Bertalign's INFO logging.")
     args = parser.parse_args()
@@ -157,25 +148,39 @@ def main() -> None:
         format="%(message)s",
     )
 
+    if args.tool == "bertalign" and args.embed != "labse":
+        parser.error("bertalign only supports --embed labse")
+
     device = resolve_device(args.device)
-    print(f"Device: {device}")
+    print(f"Device: {device} | tool: {args.tool} | embed: {args.embed}")
 
-    # Load the model ONCE and reuse it for every summary. This is the slow,
-    # one-time step (first run also downloads LaBSE, ~1.8 GB).
+    # LaBSE is always needed as the neutral scorer (and as the embed model for
+    # --embed labse). Load it via bertalign's Encoder when we need the bertalign
+    # tool, else directly via sentence-transformers. Loaded ONCE and reused.
     t0 = time.perf_counter()
-    from bertalign import Bertalign, Encoder
+    bert_encoder = None
+    if args.tool == "bertalign":
+        from bertalign import Encoder
 
-    encoder = Encoder("LaBSE", device=device)
-    load_s = time.perf_counter() - t0
-    print(f"Loaded LaBSE in {load_s:.1f}s\n")
+        bert_encoder = Encoder("LaBSE", device=device)
+        labse_model = bert_encoder.model
+    else:
+        from sentence_transformers import SentenceTransformer
+
+        labse_model = SentenceTransformer("LaBSE", device=device)
+    print(f"Loaded LaBSE in {time.perf_counter() - t0:.1f}s\n")
 
     df = load_rows(args.subset)
 
-    out_path = Path(args.out or f"{args.src}_{args.tgt}_{args.n}.jsonl")
+    suffix = str(args.n) if args.n else "full"
+    out_path = Path(
+        args.out
+        or f"{args.tool}_{args.embed}_{args.src}_{args.tgt}_{suffix}.jsonl"
+    )
     written = 0
     with out_path.open("w", encoding="utf-8") as fh:
         for _, row in df.iterrows():
-            if written >= args.n:
+            if args.n and written >= args.n:
                 break
             src_text = get_summary(row, args.src)
             tgt_text = get_summary(row, args.tgt)
@@ -191,32 +196,32 @@ def main() -> None:
             title = row.get("title")
 
             t1 = time.perf_counter()
-            aligner = Bertalign(
-                "\n".join(src_sents),
-                "\n".join(tgt_sents),
-                is_split=True,
-                model=encoder,
-            )
-            aligner.align_sents()
-            pairs = aligner.sent_pairs()
-            scores = score_pairs(encoder, pairs)
+            pairs = align_pair(args.tool, args.embed, labse_model, src_sents,
+                               tgt_sents, args.src, args.tgt,
+                               device=device, bert_encoder=bert_encoder)
+            scores = score_pairs(labse_model, pairs)
             dt = time.perf_counter() - t1
             matched = [s for s in scores if s is not None]
             mean_score = round(sum(matched) / len(matched), 4) if matched else None
 
-            print(f"=== tez_id={tez_id} | {args.src}->{args.tgt} | "
+            print(f"=== tez_id={tez_id} | {args.tool}/{args.embed} | "
+                  f"{args.src}->{args.tgt} | "
                   f"{len(src_sents)}->{len(tgt_sents)} sents | "
                   f"{len(pairs)} beads | mean cos={mean_score} | {dt:.2f}s ===")
-            print(f"    {title}")
-            for (src_line, tgt_line), score in zip(pairs, scores):
-                tag = f"{score:.3f}" if score is not None else "  -  "
-                print(f"  [{tag}] [{args.src}] {src_line}")
-                print(f"          [{args.tgt}] {tgt_line}")
-                print()
+            # Print every bead only for a small smoke run; stay quiet for full runs.
+            if args.n:
+                print(f"    {title}")
+                for (src_line, tgt_line), score in zip(pairs, scores):
+                    tag = f"{score:.3f}" if score is not None else "  -  "
+                    print(f"  [{tag}] [{args.src}] {src_line}")
+                    print(f"          [{args.tgt}] {tgt_line}")
+                    print()
 
             record = {
                 "tez_id": tez_id,
                 "title": title,
+                "tool": args.tool,
+                "embed": args.embed,
                 "src_lang": args.src,
                 "tgt_lang": args.tgt,
                 "n_src_sents": len(src_sents),

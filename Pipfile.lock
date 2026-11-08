@@ -1,7 +1,7 @@
 {
     "_meta": {
         "hash": {
-            "sha256": "dcafafb829af452c962a360357edbdfe8981d36f8508c6d5bf6c8a27d981c32b"
+            "sha256": "6244a9935e1a46d64b2ed50fa189056493d68b46fd650f6f4811dce8b5432618"
         },
         "pipfile-spec": 6,
         "requires": {
@@ -1182,6 +1182,10 @@
             ],
             "markers": "python_version >= '2'",
             "version": "==2026.6"
+        },
+        "vecalign": {
+            "git": "https://github.com/thompsonb/vecalign.git",
+            "ref": "f37262758955133d0c9ef1fdff45eba25842a62c"
         }
     },
     "develop": {}

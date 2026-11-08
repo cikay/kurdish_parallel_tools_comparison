@@ -9,6 +9,11 @@ name = "pypi"
 # Pulls in torch, sentence-transformers, numba, numpy, sentence-splitter,
 # lingua-language-detector.
 bertalign = "==2.0.1"
+# Vecalign 2.0 (pip-installable from git; builds a Cython extension, so a C
+# compiler / Xcode command line tools are needed locally).
+vecalign = {git = "https://github.com/thompsonb/vecalign.git", ref = "main"}
+# NOTE: laser_encoders (for `--embed laser`) is intentionally omitted: it pulls
+# in fairseq, which is incompatible with Python 3.12 / torch 2.x. See README.
 # Read the Hugging Face parquet subset.
 pandas = "*"
 pyarrow = "*"

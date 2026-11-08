@@ -26,16 +26,46 @@ mis-split. LaBSE itself is fully multilingual and embeds Kurdish fine — the on
 weak spot is **sentence segmentation**. So we segment ourselves (Turkish
 splitter as a proxy for the Latin-script Kurdish variants) and pass
 `is_split=True`, leaving Bertalign to do only embedding + alignment. See
-`align.py:split_sentences`.
+`kurdish_parallel/align.py:split_sentences`.
 
 ## Layout
 
 | Path | Purpose |
 |---|---|
-| `align.py` | Core logic + a local CLI (data load, sentence split, align). |
-| `modal_app/app.py` | Modal smoke test — runs both pairs on a GPU, no local torch. |
-| `Pipfile` | Local dependencies (bertalign, pandas, pyarrow, huggingface-hub). |
+| `kurdish_parallel/` | The code package (all library code lives here). |
+| `kurdish_parallel/align.py` | Data load, sentence split, and the local CLI (`python -m kurdish_parallel.align`). |
+| `kurdish_parallel/tools/tools.py` | Alignment algorithms (Bertalign, Vecalign) + `align_pair` dispatch. |
+| `kurdish_parallel/tools/embeddings.py` | Embedding models (LaBSE, SONAR) + neutral LaBSE `score_pairs`. |
+| `modal_app/app.py` | Modal smoke test — runs both pairs on a GPU, no local torch. Imports the package. |
+| `Pipfile` | Local dependencies (bertalign, vecalign, pandas, pyarrow, huggingface-hub). |
 | `results/` | Output JSONL files. |
+
+## Two aligners, two embedding models
+
+`--tool` picks the alignment algorithm; `--embed` picks the sentence-embedding
+model Vecalign uses:
+
+- **`--tool bertalign`** (default) — two-pass LaBSE DP, many-to-many beads.
+  LaBSE-only. See `kurdish_parallel/tools/tools.py:align_bertalign`.
+- **`--tool vecalign`** — Thompson & Koehn's vecalign (overlap embeddings +
+  FastDTW DP), driven in-process. Installs from git (Cython build). See
+  `kurdish_parallel/tools/tools.py:align_vecalign`.
+  - **`--embed labse`** (default) — LaBSE, same as Bertalign.
+  - **`--embed sonar`** — **SONAR** (`sonar-space`, fairseq2), which natively
+    covers `kmr_Latn` and `ckb_Arab` and beats LaBSE/LASER3 on multilingual
+    similarity. Dataset keys are FLORES-200 codes, passed as SONAR's
+    `source_lang`. **License: CC-BY-NC-4.0 (non-commercial).**
+
+The embedding model matters more than the DP algorithm for a low-resource
+language, so `vecalign --embed sonar` is the strongest setup for Kurdish.
+Regardless of `--embed`, every pair is **scored with a neutral LaBSE cosine**
+(`score_pairs`), so `mean_score` is comparable across all tool/embed
+combinations.
+
+> **Why not LASER3?** It was the obvious choice, but `laser_encoders` requires
+> `fairseq` (v1), whose wheels stop at Python 3.8 and which conflicts with
+> `torch 2.x` and with bertalign's `Python>=3.12` pin. SONAR (fairseq**2**) is
+> the modern, installable replacement.
 
 ## Run it on Modal (quick test — recommended)
 
@@ -44,14 +74,18 @@ cheap GPU. No multi-GB install on your machine; LaBSE + dataset are cached on a
 Modal Volume so reruns are fast.
 
 ```bash
-modal run modal_app/app.py            # 3 theses, T4
-modal run modal_app/app.py --n 5      # 5 theses
-modal run modal_app/app.py --gpu L4   # bigger GPU
-modal run modal_app/app.py --gpu none # CPU only
+modal run modal_app/app.py                              # bertalign/labse, 3 theses
+modal run modal_app/app.py --tool vecalign              # vecalign/labse
+modal run modal_app/app.py --tool vecalign --embed sonar  # vecalign/SONAR
+modal run modal_app/app.py --n 50                       # smoke on 50 theses
+modal run modal_app/app.py --tool vecalign --embed sonar --n 0  # FULL subset
+modal run modal_app/app.py --gpu L4                     # bigger GPU
+modal run modal_app/app.py --gpu none                   # CPU only
 ```
 
-Output: `results/smoke_{n}.jsonl` (one record per thesis-and-target, with
-aligned `pairs` and per-alignment timing).
+Output file: `results/{tool}_{embed}_smoke_{n}.jsonl` when `--n` is given
+(n > 0), otherwise `results/{tool}_{embed}_full.jsonl`. One record per
+thesis-and-target, with aligned `pairs`, per-bead cosine `score`, and timing.
 
 First run builds the remote image (installs torch) and downloads LaBSE
 (~1.8 GB) — a few minutes. After that, alignment itself is sub-second per
@@ -60,14 +94,17 @@ abstract pair.
 ## Run it locally (pipenv)
 
 ```bash
-pipenv install                                       # one-time (pulls torch etc.)
-pipenv run python align.py --n 3                      # kmr_Latn -> tur_Latn
-pipenv run python align.py --src kmr_Latn --tgt eng_Latn --n 3
+pipenv install                                            # one-time (pulls torch etc.)
+pipenv run python -m kurdish_parallel.align --n 3                         # bertalign/labse, kmr -> tur
+pipenv run python -m kurdish_parallel.align --tool vecalign --embed sonar --n 3  # vecalign/SONAR (needs sonar-space)
+pipenv run python -m kurdish_parallel.align --src kmr_Latn --tgt eng_Latn --n 3
+pipenv run python -m kurdish_parallel.align --src kmr_Latn --tgt eng_Latn  # omit --n for full
 ```
 
 On Apple Silicon the script auto-selects the **MPS** (Metal) device; the first
-line of output prints `Device: mps`. Output: `results/{src}_{tgt}_{n}.jsonl`
-(or `--out`). Default output name is `{src}_{tgt}_{n}.jsonl` in the CWD.
+line of output prints `Device: … | tool: … | embed: …`. Default output name is
+`{tool}_{embed}_{src}_{tgt}_{n}.jsonl`, or `…_full.jsonl` when `--n` is omitted
+(override with `--out`).
 
 ### Local timing (Apple M3, 16 GB, MPS)
 
@@ -108,7 +145,7 @@ recover our own: `score` is the **cosine similarity** of the aligned segment
 pair (re-encoded with LaBSE, L2-normalized), in `[-1, 1]`. Good matches are
 typically ~0.6–0.95; a low score flags a dubious pair. `mean_score` averages
 the scored (non-insertion) beads — a quick per-thesis quality signal and a
-natural threshold for filtering. See `align.py:score_pairs`.
+natural threshold for filtering. See `kurdish_parallel/tools/embeddings.py:score_pairs`.
 
 ## Quality notes
 
