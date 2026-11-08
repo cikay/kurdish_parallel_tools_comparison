@@ -137,10 +137,15 @@ def main() -> None:
                         help="Vecalign embedding model (default: labse). "
                              "bertalign is LaBSE-only.")
     parser.add_argument("--n", type=int, default=None,
-                        help="How many theses to align; omit for the full subset.")
+                        help="How many theses to align. Required unless --is-full.")
+    parser.add_argument("--is-full", action="store_true", default=False,
+                        help="Align the whole subset (ignores --n).")
     parser.add_argument("--verbose", action="store_true",
                         help="Show Bertalign's INFO logging.")
     args = parser.parse_args()
+
+    if not args.is_full and args.n is None:
+        parser.error("--n is required unless --is-full is set")
 
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
@@ -171,7 +176,7 @@ def main() -> None:
 
     df = load_rows(args.subset)
 
-    suffix = str(args.n) if args.n else "full"
+    suffix = "full" if args.is_full else str(args.n)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = RESULTS_DIR / f"{args.tool}_{args.embed}_{suffix}.jsonl"
 
@@ -179,7 +184,7 @@ def main() -> None:
     records_written = 0
     with out_path.open("w", encoding="utf-8") as fh:
         for _, row in df.iterrows():
-            if args.n and theses_done >= args.n:
+            if not args.is_full and theses_done >= args.n:
                 break
             src_text = get_summary(row, SRC_LANG)
             if not src_text:
@@ -215,7 +220,7 @@ def main() -> None:
                       f"{len(src_sents)}->{len(tgt_sents)} sents | "
                       f"{len(pairs)} beads | mean cos={mean_score} | {dt:.2f}s ===")
                 # Print every bead only for a small smoke run; quiet for full runs.
-                if args.n:
+                if not args.is_full:
                     print(f"    {title}")
                     for (src_line, tgt_line), score in zip(pairs, scores):
                         tag = f"{score:.3f}" if score is not None else "  -  "

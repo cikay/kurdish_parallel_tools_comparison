@@ -93,10 +93,11 @@ Local (pipenv — pulls torch locally, uses Apple MPS):
 pipenv install
 pipenv run python -m kurdish_parallel.align --n 3   # kmr_Latn -> every other language
 ```
-- CLI args: `--subset`, `--tool`, `--embed`, `--n`, `--verbose`. Source is fixed
-  (`SRC_LANG = kmr_Latn`) and every other summary language (`TARGET_LANGS`) is a
-  target; device is always `resolve_device("auto")`. (No `--src/--tgt/--device/
-  --out` — removed; outputs always go to `results/`.)
+- CLI args: `--subset`, `--tool`, `--embed`, `--n`, `--is-full`, `--verbose`.
+  `--n` is required unless `--is-full` is passed (full subset, ignores `--n`).
+  Source is fixed (`SRC_LANG = kmr_Latn`) and every other summary language
+  (`TARGET_LANGS`) is a target; device is always `resolve_device("auto")`. (No
+  `--src/--tgt/--device/--out` — removed; outputs always go to `results/`.)
 
 Modal smoke test (recommended; no local torch, runs on a GPU, both pairs):
 ```bash
@@ -115,8 +116,8 @@ modal run modal_app/app.py --n 3
 ## Conventions
 
 - Output files go in `results/`.
-  - Local CLI: `{tool}_{embed}_{n}.jsonl`, or `{tool}_{embed}_full.jsonl` when
-    `--n` is omitted. Source is fixed (kmr_Latn) and all targets go in one file,
+  - Local CLI: `{tool}_{embed}_{n}.jsonl`, or `{tool}_{embed}_full.jsonl` with
+    `--is-full`. Source is fixed (kmr_Latn) and all targets go in one file,
     so src/tgt are no longer in the name. NOTE: the `…_full.jsonl` form matches
     the Modal full name — local covers all `TARGET_LANGS`, Modal only tur+eng, so
     don't mix them in the same `results/`.

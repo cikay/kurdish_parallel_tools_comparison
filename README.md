@@ -101,13 +101,15 @@ pipenv install                                            # one-time (pulls torc
 pipenv run python -m kurdish_parallel.align --n 3                         # bertalign/labse, 3 theses
 pipenv run python -m kurdish_parallel.align --tool vecalign --embed sonar --n 3  # vecalign/SONAR (needs sonar-space)
 pipenv run python -m kurdish_parallel.align --tool vecalign --n 3         # vecalign/labse
-pipenv run python -m kurdish_parallel.align                               # omit --n for the full subset
+pipenv run python -m kurdish_parallel.align --is-full                     # the full subset
 ```
 
-On Apple Silicon the device is auto-selected as **MPS** (Metal); the first line
-of output prints `Device: … | tool: … | embed: …`. Output goes to
-`results/{tool}_{embed}_{n}.jsonl` when `--n` is given, else
-`results/{tool}_{embed}_full.jsonl` — one record per thesis-and-target.
+`--n` is **required** unless you pass `--is-full` (which aligns the whole subset
+and ignores `--n`). On Apple Silicon the device is auto-selected as **MPS**
+(Metal); the first line of output prints `Device: … | tool: … | embed: …`.
+Output goes to `results/{tool}_{embed}_{n}.jsonl`, or
+`results/{tool}_{embed}_full.jsonl` with `--is-full` — one record per
+thesis-and-target.
 
 ### Local timing (Apple M3, 16 GB, MPS)
 
