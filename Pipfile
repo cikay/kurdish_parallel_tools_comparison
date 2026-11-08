@@ -1,0 +1,18 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+# Maintained fork of bfsujason/bertalign: LaBSE embeddings, no faiss-gpu,
+# offline language detection (lingua), sentence-splitter segmentation.
+# Pulls in torch, sentence-transformers, numba, numpy, sentence-splitter,
+# lingua-language-detector.
+bertalign = "==2.0.1"
+# Read the Hugging Face parquet subset.
+pandas = "*"
+pyarrow = "*"
+huggingface-hub = "*"
+
+[requires]
+python_version = "3.13"
