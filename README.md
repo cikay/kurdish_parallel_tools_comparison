@@ -1,4 +1,4 @@
-# kurdish_parallel
+# kurdish_parallel_tools_comparison
 
 Sentence alignment of Kurdish parallel data from the
 [`muzaffercky/kurdish-theses-yok`](https://huggingface.co/datasets/muzaffercky/kurdish-theses-yok)
@@ -26,16 +26,16 @@ mis-split. LaBSE itself is fully multilingual and embeds Kurdish fine — the on
 weak spot is **sentence segmentation**. So we segment ourselves (Turkish
 splitter as a proxy for the Latin-script Kurdish variants) and pass
 `is_split=True`, leaving Bertalign to do only embedding + alignment. See
-`kurdish_parallel/align.py:split_sentences`.
+`kurdish_parallel_tools_comparison/align.py:split_sentences`.
 
 ## Layout
 
 | Path | Purpose |
 |---|---|
-| `kurdish_parallel/` | The code package (all library code lives here). |
-| `kurdish_parallel/align.py` | Data load, sentence split, and the local CLI (`python -m kurdish_parallel.align`). |
-| `kurdish_parallel/tools/tools.py` | Alignment algorithms (Bertalign, Vecalign) + `align_pair` dispatch. |
-| `kurdish_parallel/tools/embeddings.py` | Embedding models (LaBSE, SONAR). |
+| `kurdish_parallel_tools_comparison/` | The code package (all library code lives here). |
+| `kurdish_parallel_tools_comparison/align.py` | Data load, sentence split, and the local CLI (`python -m kurdish_parallel_tools_comparison.align`). |
+| `kurdish_parallel_tools_comparison/tools/tools.py` | Alignment algorithms (Bertalign, Vecalign) + `align_pair` dispatch. |
+| `kurdish_parallel_tools_comparison/tools/embeddings.py` | Embedding models (LaBSE, SONAR). |
 | `modal_app/app.py` | Modal smoke test — runs both pairs on a GPU, no local torch. Imports the package. |
 | `Pipfile` | Local dependencies (bertalign, vecalign, pandas, pyarrow, huggingface-hub). |
 | `results/` | Output JSONL files. |
@@ -46,10 +46,10 @@ splitter as a proxy for the Latin-script Kurdish variants) and pass
 model Vecalign uses:
 
 - **`--tool bertalign`** (default) — two-pass LaBSE DP, many-to-many beads.
-  LaBSE-only. See `kurdish_parallel/tools/tools.py:align_bertalign`.
+  LaBSE-only. See `kurdish_parallel_tools_comparison/tools/tools.py:align_bertalign`.
 - **`--tool vecalign`** — Thompson & Koehn's vecalign (overlap embeddings +
   FastDTW DP), driven in-process. Installs from git (Cython build). See
-  `kurdish_parallel/tools/tools.py:align_vecalign`.
+  `kurdish_parallel_tools_comparison/tools/tools.py:align_vecalign`.
   - **`--embed labse`** (default) — LaBSE, same as Bertalign.
   - **`--embed sonar`** — **SONAR** (`sonar-space`, fairseq2), which natively
     covers `kmr_Latn` and `ckb_Arab` and beats LaBSE/LASER3 on multilingual
@@ -97,10 +97,10 @@ Source is always `kmr_Latn`; every other summary language present in a row
 
 ```bash
 pipenv install                                            # one-time (pulls torch etc.)
-pipenv run python -m kurdish_parallel.align --n 3                         # bertalign/labse, 3 theses
-pipenv run python -m kurdish_parallel.align --tool vecalign --embed sonar --n 3  # vecalign/SONAR (needs sonar-space)
-pipenv run python -m kurdish_parallel.align --tool vecalign --n 3         # vecalign/labse
-pipenv run python -m kurdish_parallel.align --is-full                     # the full subset
+pipenv run python -m kurdish_parallel_tools_comparison.align --n 3                         # bertalign/labse, 3 theses
+pipenv run python -m kurdish_parallel_tools_comparison.align --tool vecalign --embed sonar --n 3  # vecalign/SONAR (needs sonar-space)
+pipenv run python -m kurdish_parallel_tools_comparison.align --tool vecalign --n 3         # vecalign/labse
+pipenv run python -m kurdish_parallel_tools_comparison.align --is-full                     # the full subset
 ```
 
 `--n` is **required** unless you pass `--is-full` (which aligns the whole subset

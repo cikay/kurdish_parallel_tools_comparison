@@ -14,7 +14,7 @@ PyPI fork (LaBSE embeddings). See `README.md` for the full picture.
   `kmr_Latn/train-00000-of-00001.parquet` (408 rows).
 - Abstracts live in a `summaries` **struct** column with keys `kmr_Latn`,
   `zza_Latn`, `ckb_Arab`, `tur_Latn`, `eng_Latn`. **Any key may be `null`** —
-  always guard for it (`kurdish_parallel/align.py:get_summary`).
+  always guard for it (`kurdish_parallel_tools_comparison/align.py:get_summary`).
 - Abstracts are short (~200–280 words). Parallel pairs we care about:
   **kmr_Latn → tur_Latn** and **kmr_Latn → eng_Latn**.
 
@@ -27,29 +27,29 @@ embeds Kurdish fine. So:
 - We **pre-split sentences ourselves** and call `Bertalign(..., is_split=True)`.
 - Kurdish (Latin) is split with the **Turkish** sentence-splitter as a proxy;
   `*_Arab` keys use a regex fallback. See
-  `kurdish_parallel/align.py:split_sentences` and `SPLITTER_LANG`.
+  `kurdish_parallel_tools_comparison/align.py:split_sentences` and `SPLITTER_LANG`.
 - This means language detection quality is irrelevant to results — only
   segmentation matters.
 
-### Package layout (all code in `kurdish_parallel/`, except Modal)
+### Package layout (all code in `kurdish_parallel_tools_comparison/`, except Modal)
 
-All library code lives in the `kurdish_parallel/` package; only the Modal
+All library code lives in the `kurdish_parallel_tools_comparison/` package; only the Modal
 orchestration sits outside it (in `modal_app/`, which imports the package).
 
 | Module | Holds |
 |---|---|
-| `kurdish_parallel/align.py` | Data load (`load_rows`, `get_summary`), segmentation (`split_sentences`, `SPLITTER_LANG`), `resolve_device`, and the CLI `main`. Re-exports the aligners so `import kurdish_parallel.align as A` still exposes everything. |
-| `kurdish_parallel/tools/tools.py` | Alignment algorithms (`align_bertalign`, `align_vecalign`) + `align_pair` dispatch + `TOOLS`. |
-| `kurdish_parallel/tools/embeddings.py` | Embed fns (`labse_embed_fn`, `sonar_embed_fn`, `_sonar_pipeline`) + `EMBEDS`. |
+| `kurdish_parallel_tools_comparison/align.py` | Data load (`load_rows`, `get_summary`), segmentation (`split_sentences`, `SPLITTER_LANG`), `resolve_device`, and the CLI `main`. Re-exports the aligners so `import kurdish_parallel_tools_comparison.align as A` still exposes everything. |
+| `kurdish_parallel_tools_comparison/tools/tools.py` | Alignment algorithms (`align_bertalign`, `align_vecalign`) + `align_pair` dispatch + `TOOLS`. |
+| `kurdish_parallel_tools_comparison/tools/embeddings.py` | Embed fns (`labse_embed_fn`, `sonar_embed_fn`, `_sonar_pipeline`) + `EMBEDS`. |
 
 `align.py` is the single source of truth for the data/CLI layer; the Modal app
 imports the package rather than duplicating logic. `align.py` uses package
-relative imports, so run the CLI as a module: `python -m kurdish_parallel.align`
+relative imports, so run the CLI as a module: `python -m kurdish_parallel_tools_comparison.align`
 (not `python align.py`).
 
 ## Tools (`--tool`) and embeddings (`--embed`)
 
-`kurdish_parallel/tools/tools.py:align_pair(tool, embed, encoder, src_sents,
+`kurdish_parallel_tools_comparison/tools/tools.py:align_pair(tool, embed, encoder, src_sents,
 tgt_sents, src_lang, tgt_lang)` dispatches to:
 
 - `align_bertalign` — `Bertalign(..., is_split=True, model=encoder)`. LaBSE-only
@@ -126,7 +126,7 @@ legacy `laser_image`. SONAR remains the modern replacement but is **CC-BY-NC**
 Local (pipenv — pulls torch locally, uses Apple MPS):
 ```bash
 pipenv install
-pipenv run python -m kurdish_parallel.align --n 3   # kmr_Latn -> every other language
+pipenv run python -m kurdish_parallel_tools_comparison.align --n 3   # kmr_Latn -> every other language
 ```
 - CLI args: `--subset`, `--tool`, `--embed`, `--n`, `--is-full`, `--verbose`.
   `--n` is required unless `--is-full` is passed (full subset, ignores `--n`).
@@ -143,7 +143,7 @@ modal run modal_app/app.py --n 3
   only takes `--n`, `--gpu`, `--device`.
 - `modal` lives in the user's project virtualenvs, not on the system Python
   (Homebrew Python blocks `pip install` via PEP 668). It is installed in THIS
-  project's pipenv venv (`kurdish_parallel-*`), so `modal run …` works with the
+  project's pipenv venv (`kurdish_parallel_tools_comparison-*`), so `modal run …` works with the
   venv active. Another copy is at
   `~/.local/share/virtualenvs/sorjin-modal-ZLvY6A0z/bin/modal`. Token at
   `~/.modal.toml` (already configured).

@@ -43,8 +43,8 @@ TARGET_LANGS = ["tur_Latn", "eng_Latn"]
 SUBSET = "kmr_Latn"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LOCAL_PKG = REPO_ROOT / "kurdish_parallel"  # the code package (align + tools/)
-REMOTE_SRC_DIR = "/root/src"  # put on sys.path; package lands at src/kurdish_parallel
+LOCAL_PKG = REPO_ROOT / "kurdish_parallel_tools_comparison"  # the code package (align + tools/)
+REMOTE_SRC_DIR = "/root/src"  # put on sys.path; package lands at src/kurdish_parallel_tools_comparison
 
 app = modal.App(APP_NAME)
 
@@ -58,7 +58,7 @@ labse_image = (
     _base.pip_install("bertalign==2.0.1", "pandas", "pyarrow", "huggingface-hub")
     .pip_install("git+https://github.com/thompsonb/vecalign.git@main")
     .env({"HF_HOME": f"{CACHE_PATH}/huggingface"})
-    .add_local_dir(str(LOCAL_PKG), f"{REMOTE_SRC_DIR}/kurdish_parallel")
+    .add_local_dir(str(LOCAL_PKG), f"{REMOTE_SRC_DIR}/kurdish_parallel_tools_comparison")
 )
 
 # SONAR stack: vecalign + sonar-space (fairseq2) + sentence-transformers. No
@@ -89,7 +89,7 @@ sonar_image = (
     )
     .pip_install("git+https://github.com/thompsonb/vecalign.git@main")
     .env({"HF_HOME": f"{CACHE_PATH}/huggingface"})
-    .add_local_dir(str(LOCAL_PKG), f"{REMOTE_SRC_DIR}/kurdish_parallel")
+    .add_local_dir(str(LOCAL_PKG), f"{REMOTE_SRC_DIR}/kurdish_parallel_tools_comparison")
 )
 
 # LASER3 stack: laser_encoders -> fairseq v1, which is pinned to legacy torch and
@@ -138,7 +138,7 @@ laser_image = (
         "cd /opt/vecalign && python -m pip install --no-deps --no-build-isolation .",
     )
     .env({"HF_HOME": f"{CACHE_PATH}/huggingface"})
-    .add_local_dir(str(LOCAL_PKG), f"{REMOTE_SRC_DIR}/kurdish_parallel")
+    .add_local_dir(str(LOCAL_PKG), f"{REMOTE_SRC_DIR}/kurdish_parallel_tools_comparison")
 )
 
 
@@ -160,7 +160,7 @@ def _run_alignment(subset: str, src: str, targets: list[str], n: int,
     os.makedirs(os.environ["LASER_MODEL_DIR"], exist_ok=True)
 
     sys.path.insert(0, REMOTE_SRC_DIR)
-    import kurdish_parallel.align as A  # the shipped local package
+    import kurdish_parallel_tools_comparison.align as A  # the shipped local package
 
     dev = A.resolve_device(device)  # "auto" -> cuda when a GPU is attached
 

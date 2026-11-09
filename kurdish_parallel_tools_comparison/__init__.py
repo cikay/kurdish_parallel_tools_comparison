@@ -1,4 +1,4 @@
-"""kurdish_parallel: sentence alignment of the kurdish-theses-yok summaries.
+"""kurdish_parallel_tools_comparison: sentence alignment of the kurdish-theses-yok summaries.
 
 Layout:
   * ``align``            - data loading, sentence splitting, and the CLI.

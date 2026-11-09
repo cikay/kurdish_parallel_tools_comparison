@@ -7,7 +7,7 @@ Two concerns, two modules:
     ``align_pair`` dispatcher.
 
 Re-exported here so callers can do
-``from kurdish_parallel.tools import align_pair``.
+``from kurdish_parallel_tools_comparison.tools import align_pair``.
 """
 
 from .embeddings import (

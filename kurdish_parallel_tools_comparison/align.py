@@ -14,14 +14,14 @@ for the Latin-script Kurdish variants) and let the tool do only the alignment.
 
 This module is the data + CLI layer. The alignment algorithms and embedding
 models live in the ``tools`` package and are re-exported below so existing
-callers (``import kurdish_parallel.align as A``) keep working:
+callers (``import kurdish_parallel_tools_comparison.align as A``) keep working:
     * tools.tools      - align_bertalign, align_vecalign, align_pair (+ TOOLS)
     * tools.embeddings - labse/sonar embed fns (+ EMBEDS)
 
 Source is always kmr_Latn; every other summary language present in a row is a
 target (null ones are skipped). Run as a module inside the pipenv shell:
-    pipenv run python -m kurdish_parallel.align --n 3
-    pipenv run python -m kurdish_parallel.align --tool vecalign --embed sonar --n 5 --verbose
+    pipenv run python -m kurdish_parallel_tools_comparison.align --n 3
+    pipenv run python -m kurdish_parallel_tools_comparison.align --tool vecalign --embed sonar --n 5 --verbose
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ import re
 import time
 from pathlib import Path
 
-# Re-exported so ``import kurdish_parallel.align as A`` still exposes the aligners
+# Re-exported so ``import kurdish_parallel_tools_comparison.align as A`` still exposes the aligners
 # that now live in the tools package (used by modal_app/app.py and the local CLI).
 from .tools.embeddings import (  # noqa: F401
     EMBEDS,
