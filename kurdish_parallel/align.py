@@ -16,7 +16,7 @@ This module is the data + CLI layer. The alignment algorithms and embedding
 models live in the ``tools`` package and are re-exported below so existing
 callers (``import kurdish_parallel.align as A``) keep working:
     * tools.tools      - align_bertalign, align_vecalign, align_pair (+ TOOLS)
-    * tools.embeddings - labse/sonar embed fns, score_pairs (+ EMBEDS)
+    * tools.embeddings - labse/sonar embed fns (+ EMBEDS)
 
 Source is always kmr_Latn; every other summary language present in a row is a
 target (null ones are skipped). Run as a module inside the pipenv shell:
@@ -33,12 +33,11 @@ import re
 import time
 from pathlib import Path
 
-# Re-exported so ``import kurdish_parallel.align as A`` still exposes the aligners/scorer that
-# now live in the tools package (used by modal_app/app.py and the local CLI).
+# Re-exported so ``import kurdish_parallel.align as A`` still exposes the aligners
+# that now live in the tools package (used by modal_app/app.py and the local CLI).
 from .tools.embeddings import (  # noqa: F401
     EMBEDS,
     labse_embed_fn,
-    score_pairs,
     sonar_embed_fn,
 )
 from .tools.tools import (  # noqa: F401
@@ -146,16 +145,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def load_labse_and_encoder(tool: str, device: str):
-    """Load the LaBSE scorer (and a bertalign Encoder when tool==bertalign).
+def load_labse_and_encoder(tool: str, embed: str, device: str):
+    """Load LaBSE only when it is the aligning embedding.
 
-    LaBSE is always needed as the neutral scorer and as the --embed labse model.
-    For bertalign we load it through the Encoder and reuse that model for
-    scoring too; otherwise a plain SentenceTransformer. Call ONCE and reuse the
-    result across every thesis.
+    LaBSE is needed as the ``--embed labse`` model (and, for bertalign, via its
+    Encoder). With ``--embed sonar`` nothing here is needed, so we skip the load
+    entirely. Call ONCE and reuse the result across every thesis.
 
     Returns:
-        (labse_model, bert_encoder) where bert_encoder is None unless bertalign.
+        (labse_model, bert_encoder); either may be None when LaBSE isn't needed.
     """
     if tool == "bertalign":
         from bertalign import Encoder
@@ -163,9 +161,12 @@ def load_labse_and_encoder(tool: str, device: str):
         bert_encoder = Encoder("LaBSE", device=device)
         return bert_encoder.model, bert_encoder
 
-    from sentence_transformers import SentenceTransformer
+    if embed == "labse":
+        from sentence_transformers import SentenceTransformer
 
-    return SentenceTransformer("LaBSE", device=device), None
+        return SentenceTransformer("LaBSE", device=device), None
+
+    return None, None
 
 
 def align_one(tool: str, embed: str, labse_model, bert_encoder, device: str,
@@ -175,11 +176,7 @@ def align_one(tool: str, embed: str, labse_model, bert_encoder, device: str,
     t0 = time.perf_counter()
     pairs = align_pair(tool, embed, labse_model, src_sents, tgt_sents,
                        SRC_LANG, tgt_lang, device=device, bert_encoder=bert_encoder)
-    scores = score_pairs(labse_model, pairs)
     align_seconds = time.perf_counter() - t0
-
-    matched = [s for s in scores if s is not None]
-    mean_score = round(sum(matched) / len(matched), 4) if matched else None
 
     return {
         "tez_id": tez_id,
@@ -191,9 +188,7 @@ def align_one(tool: str, embed: str, labse_model, bert_encoder, device: str,
         "n_src_sents": len(src_sents),
         "n_tgt_sents": len(tgt_sents),
         "align_seconds": round(align_seconds, 3),
-        "mean_score": mean_score,
-        "pairs": [{"src": s, "tgt": t, "score": sc}
-                  for (s, t), sc in zip(pairs, scores)],
+        "pairs": [{"src": s, "tgt": t} for s, t in pairs],
     }
 
 
@@ -231,16 +226,13 @@ def print_record(record: dict, show_beads: bool) -> None:
     print(f"=== tez_id={record['tez_id']} | {record['tool']}/{record['embed']} | "
           f"{record['src_lang']}->{record['tgt_lang']} | "
           f"{record['n_src_sents']}->{record['n_tgt_sents']} sents | "
-          f"{len(record['pairs'])} beads | mean cos={record['mean_score']} | "
-          f"{record['align_seconds']}s ===")
+          f"{len(record['pairs'])} beads | {record['align_seconds']}s ===")
     if not show_beads:
         return
     print(f"    {record['title']}")
     for pair in record["pairs"]:
-        score = pair["score"]
-        tag = f"{score:.3f}" if score is not None else "  -  "
-        print(f"  [{tag}] [{record['src_lang']}] {pair['src']}")
-        print(f"          [{record['tgt_lang']}] {pair['tgt']}")
+        print(f"  [{record['src_lang']}] {pair['src']}")
+        print(f"  [{record['tgt_lang']}] {pair['tgt']}")
         print()
 
 
@@ -262,8 +254,8 @@ def main() -> None:
     print(f"Device: {device} | tool: {args.tool} | embed: {args.embed}")
 
     t0 = time.perf_counter()
-    labse_model, bert_encoder = load_labse_and_encoder(args.tool, device)
-    print(f"Loaded LaBSE in {time.perf_counter() - t0:.1f}s\n")
+    labse_model, bert_encoder = load_labse_and_encoder(args.tool, args.embed, device)
+    print(f"Loaded models in {time.perf_counter() - t0:.1f}s\n")
 
     df = load_rows(args.subset)
 

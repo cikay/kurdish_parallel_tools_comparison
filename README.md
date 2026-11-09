@@ -35,7 +35,7 @@ splitter as a proxy for the Latin-script Kurdish variants) and pass
 | `kurdish_parallel/` | The code package (all library code lives here). |
 | `kurdish_parallel/align.py` | Data load, sentence split, and the local CLI (`python -m kurdish_parallel.align`). |
 | `kurdish_parallel/tools/tools.py` | Alignment algorithms (Bertalign, Vecalign) + `align_pair` dispatch. |
-| `kurdish_parallel/tools/embeddings.py` | Embedding models (LaBSE, SONAR) + neutral LaBSE `score_pairs`. |
+| `kurdish_parallel/tools/embeddings.py` | Embedding models (LaBSE, SONAR). |
 | `modal_app/app.py` | Modal smoke test — runs both pairs on a GPU, no local torch. Imports the package. |
 | `Pipfile` | Local dependencies (bertalign, vecalign, pandas, pyarrow, huggingface-hub). |
 | `results/` | Output JSONL files. |
@@ -58,9 +58,8 @@ model Vecalign uses:
 
 The embedding model matters more than the DP algorithm for a low-resource
 language, so `vecalign --embed sonar` is the strongest setup for Kurdish.
-Regardless of `--embed`, every pair is **scored with a neutral LaBSE cosine**
-(`score_pairs`), so `mean_score` is comparable across all tool/embed
-combinations.
+Alignments are not scored intrinsically; quality is judged against an external
+gold set.
 
 > **Why not LASER3?** It was the obvious choice, but `laser_encoders` requires
 > `fairseq` (v1), whose wheels stop at Python 3.8 and which conflicts with
@@ -85,7 +84,7 @@ modal run modal_app/app.py --gpu none                   # CPU only
 
 Output file: `results/{tool}_{embed}_smoke_{n}.jsonl` when `--n` is given
 (n > 0), otherwise `results/{tool}_{embed}_full.jsonl`. One record per
-thesis-and-target, with aligned `pairs`, per-bead cosine `score`, and timing.
+thesis-and-target, with aligned `pairs` and timing.
 
 First run builds the remote image (installs torch) and downloads LaBSE
 (~1.8 GB) — a few minutes. After that, alignment itself is sub-second per
@@ -135,22 +134,17 @@ Each JSONL record:
   "n_src_sents": 14,
   "n_tgt_sents": 15,
   "align_seconds": 0.42,
-  "mean_score": 0.83,
-  "pairs": [{"src": "…", "tgt": "…", "score": 0.87}, ...]
+  "pairs": [{"src": "…", "tgt": "…"}, ...]
 }
 ```
 
 A `pair` with an empty `src` or `tgt` is an insertion/deletion (a sentence on
-one side with no counterpart); its `score` is `null`.
+one side with no counterpart).
 
-### Alignment score
+### Evaluating alignment quality
 
-Bertalign computes a per-bead similarity internally but discards it, so we
-recover our own: `score` is the **cosine similarity** of the aligned segment
-pair (re-encoded with LaBSE, L2-normalized), in `[-1, 1]`. Good matches are
-typically ~0.6–0.95; a low score flags a dubious pair. `mean_score` averages
-the scored (non-insertion) beads — a quick per-thesis quality signal and a
-natural threshold for filtering. See `kurdish_parallel/tools/embeddings.py:score_pairs`.
+Records carry no intrinsic score. Alignment quality is evaluated against an
+external gold set rather than a self-reported similarity.
 
 ## Quality notes
 

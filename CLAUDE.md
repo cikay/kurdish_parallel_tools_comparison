@@ -38,9 +38,9 @@ orchestration sits outside it (in `modal_app/`, which imports the package).
 
 | Module | Holds |
 |---|---|
-| `kurdish_parallel/align.py` | Data load (`load_rows`, `get_summary`), segmentation (`split_sentences`, `SPLITTER_LANG`), `resolve_device`, and the CLI `main`. Re-exports the aligners/scorer so `import kurdish_parallel.align as A` still exposes everything. |
+| `kurdish_parallel/align.py` | Data load (`load_rows`, `get_summary`), segmentation (`split_sentences`, `SPLITTER_LANG`), `resolve_device`, and the CLI `main`. Re-exports the aligners so `import kurdish_parallel.align as A` still exposes everything. |
 | `kurdish_parallel/tools/tools.py` | Alignment algorithms (`align_bertalign`, `align_vecalign`) + `align_pair` dispatch + `TOOLS`. |
-| `kurdish_parallel/tools/embeddings.py` | Embed fns (`labse_embed_fn`, `sonar_embed_fn`, `_sonar_pipeline`) + neutral `score_pairs` + `EMBEDS`. |
+| `kurdish_parallel/tools/embeddings.py` | Embed fns (`labse_embed_fn`, `sonar_embed_fn`, `_sonar_pipeline`) + `EMBEDS`. |
 
 `align.py` is the single source of truth for the data/CLI layer; the Modal app
 imports the package rather than duplicating logic. `align.py` uses package
@@ -63,11 +63,10 @@ tgt_sents, src_lang, tgt_lang)` dispatches to:
     pipeline (`_sonar_pipeline`); `lang` is the dataset key (a FLORES-200 code)
     passed as SONAR's `source_lang`. SONAR natively covers kmr_Latn + ckb_Arab.
 
-`score_pairs(labse_model, pairs)` ALWAYS uses LaBSE as a **neutral scorer**, so
-`mean_score` is comparable across every tool/embed combo regardless of which
-embeddings drove the alignment. The scorer is a plain SentenceTransformer
-(bertalign's `Encoder.model`, or a freshly loaded `SentenceTransformer("LaBSE")`
-in the SONAR image) — intentionally decoupled from the aligner's embeddings.
+There is **no intrinsic scoring** of alignments. Output records carry only the
+aligned `pairs` (plus metadata); quality is judged against an external gold set.
+LaBSE is loaded only when it is the aligning embedding (`--embed labse`, or
+bertalign); `--embed sonar` loads no LaBSE at all.
 
 All aligners return the same `list[(src_text, tgt_text)]`. Keep that contract if
 you add a tool.

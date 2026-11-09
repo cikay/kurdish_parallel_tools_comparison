@@ -3,13 +3,12 @@ Modal smoke test for sentence alignment on the kurdish-theses-yok summaries.
 
 Aligns Kurmanji against BOTH Turkish and English, on the same theses (those that
 carry all three abstracts), with a selectable tool and embedding model. Reuses
-the local ``align.py`` logic (shipped into each image). LaBSE scores every pair
-(a neutral yardstick), so all tool/embed combos are comparable.
+the local ``align.py`` logic (shipped into each image). Alignment quality is
+evaluated against an external gold set, not an intrinsic score.
 
 Two images, because the dependency stacks don't mix:
   * labse_image  - bertalign (needs Python>=3.12) + vecalign; LaBSE embeddings.
-  * sonar_image  - vecalign + SONAR (fairseq2); no bertalign. LaBSE loaded via
-                   sentence-transformers for scoring only.
+  * sonar_image  - vecalign + SONAR (fairseq2); no bertalign.
 
     # one entry point -> no ::name needed
     modal run modal_app/app.py                              # bertalign/labse
@@ -20,8 +19,8 @@ Two images, because the dependency stacks don't mix:
     modal run modal_app/app.py --gpu L4 --n 10
 
 Output: results/{tool}_{embed}_smoke_{n}.jsonl when --n > 0, else
-results/{tool}_{embed}_full.jsonl. One record per thesis-and-target, with
-aligned `pairs`, per-bead cosine `score`, and `mean_score`.
+results/{tool}_{embed}_full.jsonl. One record per thesis-and-target, with the
+aligned `pairs`.
 """
 
 import json
@@ -58,10 +57,11 @@ labse_image = (
     .add_local_dir(str(LOCAL_PKG), f"{REMOTE_SRC_DIR}/kurdish_parallel")
 )
 
-# SONAR stack: vecalign + sonar-space (fairseq2) + sentence-transformers (for the
-# LaBSE scorer only). No bertalign (keeping it out avoids transformers/torch
-# fights with fairseq2). The whole stack is PINNED to a self-consistent set,
-# because the free resolver backtracks to a broken sonar-space (no fairseq2):
+# SONAR stack: vecalign + sonar-space (fairseq2) + sentence-transformers. No
+# bertalign (keeping it out avoids transformers/torch fights with fairseq2).
+# sentence-transformers no longer runs any of our code (scoring was removed) but
+# stays as part of the PINNED self-consistent set below -- dropping a member lets
+# the free resolver backtrack to a broken sonar-space (no fairseq2):
 #   fairseq2n 0.8.1 -> torch==2.9.1, numpy~=2.2
 #   fairseq2  0.8.1 -> transformers~=4.57
 #   sentence-transformers 3.2.1 accepts transformers 4.57 and torch 2.9
@@ -107,12 +107,13 @@ def _run_alignment(subset: str, src: str, targets: list[str], n: int,
 
     t0 = time.perf_counter()
     bert_encoder = None
+    labse_model = None
     if tool == "bertalign":
         from bertalign import Encoder
 
         bert_encoder = Encoder("LaBSE", device=dev)
         labse_model = bert_encoder.model
-    else:
+    elif embed == "labse":
         from sentence_transformers import SentenceTransformer
 
         labse_model = SentenceTransformer("LaBSE", device=dev)
@@ -141,10 +142,7 @@ def _run_alignment(subset: str, src: str, targets: list[str], n: int,
             t1 = time.perf_counter()
             pairs = A.align_pair(tool, embed, labse_model, src_sents, tgt_sents,
                                  src, tgt, device=dev, bert_encoder=bert_encoder)
-            scores = A.score_pairs(labse_model, pairs)
             align_seconds = time.perf_counter() - t1
-            matched = [s for s in scores if s is not None]
-            mean_score = round(sum(matched) / len(matched), 4) if matched else None
 
             results.append({
                 "tez_id": row.get("tez_id"),
@@ -156,9 +154,7 @@ def _run_alignment(subset: str, src: str, targets: list[str], n: int,
                 "n_src_sents": len(src_sents),
                 "n_tgt_sents": len(tgt_sents),
                 "align_seconds": round(align_seconds, 3),
-                "mean_score": mean_score,
-                "pairs": [{"src": s, "tgt": t, "score": sc}
-                          for (s, t), sc in zip(pairs, scores)],
+                "pairs": [{"src": s, "tgt": t} for s, t in pairs],
             })
         theses_done += 1
 
@@ -208,15 +204,12 @@ def main(n: int = 0, tool: str = "bertalign", embed: str = "labse",
         print(f"=== tez_id={record['tez_id']} | {record['tool']}/{record['embed']} | "
               f"{record['src_lang']}->{record['tgt_lang']} | "
               f"{record['n_src_sents']}->{record['n_tgt_sents']} sents | "
-              f"{len(record['pairs'])} beads | mean cos={record['mean_score']} | "
-              f"{record['align_seconds']}s ===")
+              f"{len(record['pairs'])} beads | {record['align_seconds']}s ===")
         if n:  # print every bead only for a small smoke run
             print(f"    {record['title']}")
             for pair in record["pairs"]:
-                score = pair["score"]
-                tag = f"{score:.3f}" if score is not None else "  -  "
-                print(f"  [{tag}] [{record['src_lang']}] {pair['src']}")
-                print(f"          [{record['tgt_lang']}] {pair['tgt']}")
+                print(f"  [{record['src_lang']}] {pair['src']}")
+                print(f"  [{record['tgt_lang']}] {pair['tgt']}")
                 print()
 
     stem = f"{tool}_{embed}_smoke_{n}" if n else f"{tool}_{embed}_full"

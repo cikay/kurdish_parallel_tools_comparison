@@ -1,19 +1,18 @@
 """Alignment tools and embedding models for the kurdish-theses-yok aligner.
 
 Two concerns, two modules:
-  * ``embeddings`` - sentence-embedding models (LaBSE, SONAR) and the neutral
-    LaBSE scorer that makes every tool/embed combo comparable.
+  * ``embeddings`` - sentence-embedding models (LaBSE, SONAR) that feed the
+    aligners.
   * ``tools`` - the alignment algorithms (Bertalign, Vecalign) and the
     ``align_pair`` dispatcher.
 
 Re-exported here so callers can do
-``from kurdish_parallel.tools import align_pair, score_pairs``.
+``from kurdish_parallel.tools import align_pair``.
 """
 
 from .embeddings import (
     EMBEDS,
     labse_embed_fn,
-    score_pairs,
     sonar_embed_fn,
 )
 from .tools import (
@@ -30,6 +29,5 @@ __all__ = [
     "align_pair",
     "align_vecalign",
     "labse_embed_fn",
-    "score_pairs",
     "sonar_embed_fn",
 ]
