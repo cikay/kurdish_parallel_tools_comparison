@@ -18,6 +18,10 @@ vecalign = {git = "https://github.com/thompsonb/vecalign.git", ref = "main"}
 pandas = "*"
 pyarrow = "*"
 huggingface-hub = "*"
+# Orchestrates the remote GPU run (`modal run modal_app/app.py`). Not imported by
+# the package -- only the local entrypoint uses it -- but installed here so
+# `modal run ...` works with this venv active.
+modal = "*"
 
 [requires]
 python_version = "3.13"

@@ -26,6 +26,7 @@ htmlcov/
 
 # Generated alignment outputs
 results/*.jsonl
+results/*.json
 
 # Caches
 .cache/

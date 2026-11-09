@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from .embeddings import EMBEDS, labse_embed_fn, laser_embed_fn, sonar_embed_fn
 
-TOOLS = ("bertalign", "vecalign")
+TOOLS = ("bertalign", "vecalign", "sentalign")
 
 
 def align_bertalign(encoder, src_sents: list[str], tgt_sents: list[str],
@@ -88,15 +88,86 @@ def align_vecalign(src_sents: list[str], tgt_sents: list[str],
     return pairs
 
 
+def align_sentalign(labse_model, src_sents: list[str], tgt_sents: list[str],
+                    max_concats: int = 4, free_concats: int = 2,
+                    score_cutoff: float = 0.4, min_words: int = 1,
+                    max_words: int = 110, penalty_after_words: int = 80,
+                    penalty_per_word: float = 0.01) -> list[tuple[str, str]]:
+    """Align with SentAlign's grid-DP core (LaBSE), driven in-process.
+
+    SentAlign (Steingrímsson et al., 2023) is LaBSE + a grid DP with a
+    length-penalty scoring function and a null/merge re-evaluation pass. For a
+    document small enough to skip its Gale-Church anchoring -- all our
+    ~14-sentence abstracts -- the whole alignment is a single DP block, so we
+    call its vendored pure-Python core (``_sentalign_core.align_anchors``)
+    directly on one block ``((-1,-1),(n_src,n_tgt))``, exactly as SentAlign
+    constructs it. No subprocess, no temp files, no Cython. Defaults mirror
+    SentAlign's CLI.
+
+    LaBSE-only, like Bertalign. The DP scores with a plain dot product, so the
+    embeddings must be L2-normalized (``labse_embed_fn`` already is).
+
+    Returns (src, tgt) text beads; an insertion/deletion has one side empty.
+    """
+    from ._sentalign_core import align_anchors
+
+    embed = labse_embed_fn(labse_model)
+    source_dict = {i: s for i, s in enumerate(src_sents)}
+    target_dict = {i: s for i, s in enumerate(tgt_sents)}
+
+    def build_emb_dict(sents: list[str]) -> dict:
+        # Every space-joined concatenation of 1..max_concats consecutive
+        # sentences -- the exact strings the DP's create_concats will look up.
+        n = len(sents)
+        strings = [" ".join(sents[i:i + length])
+                   for i in range(n)
+                   for length in range(1, max_concats + 1)
+                   if i + length <= n]
+        uniq = list(dict.fromkeys(strings))  # dedup, keep first occurrence
+        vecs = embed(uniq)
+        return {s: v for s, v in zip(uniq, vecs)}
+
+    src_emb_dict = build_emb_dict(src_sents)
+    trg_emb_dict = build_emb_dict(tgt_sents)
+
+    class _ProcInfo:
+        """Minimal stand-in for SentAlign's ReportInfo (progress hooks only)."""
+
+        def set_total_calculations(self, n):
+            pass
+
+        def add_nodes(self, n):
+            pass
+
+    anchor = ((-1, -1), (len(src_sents), len(tgt_sents)))
+    _, path, _scores = align_anchors(
+        anchor, source_dict, target_dict, src_emb_dict, trg_emb_dict,
+        score_cutoff, max_concats, min_words, max_words,
+        penalty_after_words, penalty_per_word, free_concats, _ProcInfo(),
+    )
+
+    pairs: list[tuple[str, str]] = []
+    for line in path.strip().split("\n"):
+        if not line:
+            continue
+        s, t = line.replace("[", "").replace("]", "").split(":")
+        s_nums = [x for x in s.split(",") if x != ""]
+        t_nums = [x for x in t.split(",") if x != ""]
+        src_text = " ".join(source_dict[int(x)] for x in s_nums)
+        tgt_text = " ".join(target_dict[int(x)] for x in t_nums)
+        pairs.append((src_text, tgt_text))
+    return pairs
+
+
 def align_pair(tool: str, embed: str, labse_model, src_sents: list[str],
                tgt_sents: list[str], src_lang: str, tgt_lang: str,
                device: str = "cpu", bert_encoder=None) -> list[tuple[str, str]]:
     """Dispatch to the selected aligner; all return the same (src, tgt) shape.
 
     Args:
-        tool: "bertalign" or "vecalign".
+        tool: "bertalign", "vecalign", or "sentalign".
         embed: Vecalign's embeddings, "labse", "sonar", or "laser" (LASER3,
-            legacy image only). Bertalign is LaBSE-only.
+            legacy image only). Bertalign and SentAlign are LaBSE-only.
         labse_model: SentenceTransformer LaBSE model (for the labse embed option).
         src_lang/tgt_lang: FLORES-200 codes (dataset keys), used by SONAR.
         device: torch device string, used by SONAR.
@@ -106,6 +177,10 @@ def align_pair(tool: str, embed: str, labse_model, src_sents: list[str],
         if embed != "labse":
             raise ValueError("bertalign only supports --embed labse")
         return align_bertalign(bert_encoder, src_sents, tgt_sents)
+    if tool == "sentalign":
+        if embed != "labse":
+            raise ValueError("sentalign only supports --embed labse")
+        return align_sentalign(labse_model, src_sents, tgt_sents)
     if tool == "vecalign":
         if embed == "labse":
             src_fn = tgt_fn = labse_embed_fn(labse_model)

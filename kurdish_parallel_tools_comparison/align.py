@@ -45,6 +45,7 @@ from .tools.tools import (  # noqa: F401
     TOOLS,
     align_bertalign,
     align_pair,
+    align_sentalign,
     align_vecalign,
 )
 
