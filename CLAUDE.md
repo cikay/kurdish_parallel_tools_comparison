@@ -72,6 +72,24 @@ in the SONAR image) — intentionally decoupled from the aligner's embeddings.
 All aligners return the same `list[(src_text, tgt_text)]`. Keep that contract if
 you add a tool.
 
+### SentAlign is deliberately NOT used
+
+SentAlign (Steingrímsson et al., 2023) was evaluated and **intentionally left
+out** of the comparison — do not re-add it without a reason:
+
+1. **No embedding diversity.** SentAlign is LaBSE-based, exactly like Bertalign.
+   The point of the comparison is to vary the *embedding* (LaBSE vs SONAR) for a
+   low-resource language; a second LaBSE aligner adds a DP variant but no new
+   embedding signal, so it can't move the needle on the question we care about.
+2. **Not installable here.** It is git-only and pinned to Python 3.8 /
+   transformers 4.22.2 / numpy 1.22.1, which will not coexist with our
+   Python 3.13 + torch 2.x, and its entrypoint isn't importable (argparse + file
+   I/O at import). The only clean path would be vendoring its pure-Python DP
+   core, which — given point 1 — isn't worth the maintenance.
+
+If embedding diversity ever matters more than install cost, the thing to add is
+a *different embedding*, not another LaBSE aligner.
+
 ### Two Modal images (don't merge them)
 
 - `labse_image`: bertalign (`Python>=3.12`) + vecalign + sentence-transformers.
