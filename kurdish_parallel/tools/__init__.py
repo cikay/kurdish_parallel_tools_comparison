@@ -13,6 +13,7 @@ Re-exported here so callers can do
 from .embeddings import (
     EMBEDS,
     labse_embed_fn,
+    laser_embed_fn,
     sonar_embed_fn,
 )
 from .tools import (
@@ -29,5 +30,6 @@ __all__ = [
     "align_pair",
     "align_vecalign",
     "labse_embed_fn",
+    "laser_embed_fn",
     "sonar_embed_fn",
 ]

@@ -38,6 +38,7 @@ from pathlib import Path
 from .tools.embeddings import (  # noqa: F401
     EMBEDS,
     labse_embed_fn,
+    laser_embed_fn,
     sonar_embed_fn,
 )
 from .tools.tools import (  # noqa: F401

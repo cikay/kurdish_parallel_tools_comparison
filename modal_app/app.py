@@ -6,14 +6,18 @@ carry all three abstracts), with a selectable tool and embedding model. Reuses
 the local ``align.py`` logic (shipped into each image). Alignment quality is
 evaluated against an external gold set, not an intrinsic score.
 
-Two images, because the dependency stacks don't mix:
+Three images, because the dependency stacks don't mix:
   * labse_image  - bertalign (needs Python>=3.12) + vecalign; LaBSE embeddings.
   * sonar_image  - vecalign + SONAR (fairseq2); no bertalign.
+  * laser_image  - vecalign + LASER3 (laser_encoders -> fairseq v1) on a LEGACY
+                   Python 3.10 / torch 1.13 base; no bertalign. Isolated because
+                   fairseq v1 can't coexist with torch 2.x or fairseq2.
 
     # one entry point -> no ::name needed
     modal run modal_app/app.py                              # bertalign/labse
     modal run modal_app/app.py --tool vecalign              # vecalign/labse
     modal run modal_app/app.py --tool vecalign --embed sonar  # vecalign/SONAR
+    modal run modal_app/app.py --tool vecalign --embed laser  # vecalign/LASER3
     modal run modal_app/app.py --n 50                      # smoke on 50 theses
     modal run modal_app/app.py --tool vecalign --embed sonar --n 0  # FULL subset
     modal run modal_app/app.py --gpu L4 --n 10
@@ -88,10 +92,59 @@ sonar_image = (
     .add_local_dir(str(LOCAL_PKG), f"{REMOTE_SRC_DIR}/kurdish_parallel")
 )
 
+# LASER3 stack: laser_encoders -> fairseq v1, which is pinned to legacy torch and
+# will NOT coexist with the labse_image (bertalign/torch 2.x) or sonar_image
+# (fairseq2). So it gets its own image on a LEGACY base: Python 3.10 + torch 1.13
+# + fairseq 0.12.2. This is the fragile corner of the project -- the pins below
+# are a self-consistent set, don't bump them casually:
+#   fairseq 0.12.2        -> needs torch>=1.10 + torchaudio, numpy<1.24 (np.float)
+#   torch/torchaudio 1.13 -> last line that fairseq v1 reliably builds against
+#   sentence-transformers 2.2.2 -> needs huggingface-hub<0.26 (it imports the
+#     removed `cached_download`) and transformers ~4.30; it no longer runs any of
+#     our code (scoring was removed) but stays in the proven pin set.
+# LASER3 provides the aligning embeddings; huggingface-hub also fetches the data.
+_laser_base = modal.Image.debian_slim(python_version="3.10").apt_install(
+    "build-essential", "git"
+)
+laser_image = (
+    # fairseq 0.12.2 needs omegaconf<2.1, but omegaconf 2.0.5/2.0.6 ship legacy
+    # metadata (`PyYAML (>=5.1.*)`) that pip>=24.1 rejects, so modern pip discards
+    # them and reports a bogus "conflict". Pin pip<24.1 to accept that metadata.
+    _laser_base.run_commands("python -m pip install 'pip<24.1'")
+    .pip_install(
+        "numpy==1.23.5",
+        "torch==1.13.1",
+        "torchaudio==0.13.1",
+        "fairseq==0.12.2",
+        "laser_encoders==0.0.2",
+        "huggingface-hub==0.16.4",
+        "transformers==4.30.2",
+        "sentence-transformers==2.2.2",
+        "sentence-splitter",  # align.py:split_sentences
+        "pandas",
+        "pyarrow",
+        "setuptools>=74",  # vecalign build backend (see run_commands below)
+        "Cython>=3.1",
+    )
+    # vecalign@main pins requires-python>=3.11 and numpy>=1.26.4, both of which
+    # clash with this legacy stack (Python 3.10, numpy<1.24 for fairseq v1). It's
+    # the SAME code the other images pip-install; here we clone it, relax the
+    # Python floor to 3.10, and build it against the already-installed numpy
+    # 1.23.5 (--no-build-isolation --no-deps) so the compiled dp_core matches the
+    # runtime numpy and nothing drags numpy back up.
+    .run_commands(
+        "git clone --depth 1 https://github.com/thompsonb/vecalign.git /opt/vecalign",
+        "sed -i 's/requires-python = \">=3.11\"/requires-python = \">=3.10\"/' /opt/vecalign/pyproject.toml",
+        "cd /opt/vecalign && python -m pip install --no-deps --no-build-isolation .",
+    )
+    .env({"HF_HOME": f"{CACHE_PATH}/huggingface"})
+    .add_local_dir(str(LOCAL_PKG), f"{REMOTE_SRC_DIR}/kurdish_parallel")
+)
+
 
 def _run_alignment(subset: str, src: str, targets: list[str], n: int,
                    device: str, tool: str, embed: str) -> dict:
-    """Shared remote body: load models, align every thesis, score with LaBSE."""
+    """Shared remote body: load models and align every thesis."""
     import os
     import sys
 
@@ -99,6 +152,12 @@ def _run_alignment(subset: str, src: str, targets: list[str], n: int,
     # Must not be a build-time env var, or pip caches into /cache and the volume
     # mount fails. Harmless for the LaBSE image.
     os.environ.setdefault("XDG_CACHE_HOME", f"{CACHE_PATH}/xdg")
+    # LASER3 (laser_encoders) downloads models to ~/.cache/laser_encoders by
+    # default; point it at the volume so reruns reuse them. Harmless otherwise.
+    # It does shutil.move(temp, model_dir/...) WITHOUT creating model_dir, so we
+    # must create it ourselves or the move fails with FileNotFoundError.
+    os.environ.setdefault("LASER_MODEL_DIR", f"{CACHE_PATH}/laser_encoders")
+    os.makedirs(os.environ["LASER_MODEL_DIR"], exist_ok=True)
 
     sys.path.insert(0, REMOTE_SRC_DIR)
     import kurdish_parallel.align as A  # the shipped local package
@@ -179,19 +238,34 @@ def align_sonar_remote(src, targets, subset, n, device) -> dict:
     return _run_alignment(subset, src, targets, n, device, "vecalign", "sonar")
 
 
+@app.function(image=laser_image, volumes={CACHE_PATH: cache_volume}, timeout=60 * 60)
+def align_laser_remote(src, targets, subset, n, device) -> dict:
+    # torch 1.13.1 here is the CUDA 11.7 build, and LASER3 self-moves to CUDA
+    # when a GPU is attached; without one it runs on CPU (slow). Attach a T4
+    # (not an L4 -- Ada needs CUDA >=11.8) via --gpu for the fast path.
+    return _run_alignment(subset, src, targets, n, device, "vecalign", "laser")
+
+
 @app.local_entrypoint()
 def main(n: int = 0, tool: str = "bertalign", embed: str = "labse",
          gpu: str = "T4", device: str = "auto"):
     if tool not in ("bertalign", "vecalign"):
         raise ValueError("tool must be 'bertalign' or 'vecalign'")
-    if embed not in ("labse", "sonar"):
-        raise ValueError("embed must be 'labse' or 'sonar'")
+    if embed not in ("labse", "sonar", "laser"):
+        raise ValueError("embed must be 'labse', 'sonar', or 'laser'")
     if tool == "bertalign" and embed != "labse":
         raise ValueError("bertalign only supports --embed labse")
 
     gpu_option = None if gpu.lower() in {"none", "cpu", ""} else gpu
     if embed == "sonar":
         fn = align_sonar_remote.with_options(gpu=gpu_option)
+        out = fn.remote(SRC_LANG, TARGET_LANGS, SUBSET, n, device)
+    elif embed == "laser":
+        # LASER3 auto-uses CUDA when a GPU is visible (laser_encoders'
+        # SentenceEncoder: use_cuda = torch.cuda.is_available() and not cpu).
+        # torch 1.13.1 here is the CUDA 11.7 build, so use a T4 (compute 7.5);
+        # an L4 (Ada) needs CUDA >=11.8 and won't work with this torch.
+        fn = align_laser_remote.with_options(gpu=gpu_option)
         out = fn.remote(SRC_LANG, TARGET_LANGS, SUBSET, n, device)
     else:
         fn = align_labse_remote.with_options(gpu=gpu_option)

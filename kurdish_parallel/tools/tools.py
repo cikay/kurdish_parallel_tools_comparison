@@ -7,7 +7,7 @@ a tool. Embeddings come from ``tools.embeddings``; this module is only the DP.
 
 from __future__ import annotations
 
-from .embeddings import EMBEDS, labse_embed_fn, sonar_embed_fn
+from .embeddings import EMBEDS, labse_embed_fn, laser_embed_fn, sonar_embed_fn
 
 TOOLS = ("bertalign", "vecalign")
 
@@ -95,7 +95,8 @@ def align_pair(tool: str, embed: str, labse_model, src_sents: list[str],
 
     Args:
         tool: "bertalign" or "vecalign".
-        embed: Vecalign's embeddings, "labse" or "sonar". Bertalign is LaBSE-only.
+        embed: Vecalign's embeddings, "labse", "sonar", or "laser" (LASER3,
+            legacy image only). Bertalign is LaBSE-only.
         labse_model: SentenceTransformer LaBSE model (for the labse embed option).
         src_lang/tgt_lang: FLORES-200 codes (dataset keys), used by SONAR.
         device: torch device string, used by SONAR.
@@ -111,6 +112,9 @@ def align_pair(tool: str, embed: str, labse_model, src_sents: list[str],
         elif embed == "sonar":
             src_fn = sonar_embed_fn(src_lang, device)
             tgt_fn = sonar_embed_fn(tgt_lang, device)
+        elif embed == "laser":
+            src_fn = laser_embed_fn(src_lang)
+            tgt_fn = laser_embed_fn(tgt_lang)
         else:
             raise ValueError(f"unknown embed: {embed!r} (expected one of {EMBEDS})")
         return align_vecalign(src_sents, tgt_sents, src_fn, tgt_fn)

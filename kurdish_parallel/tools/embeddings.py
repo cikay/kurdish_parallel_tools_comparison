@@ -11,9 +11,10 @@ from __future__ import annotations
 from functools import lru_cache
 
 # Embedding models available for Vecalign. Bertalign is hard-wired to LaBSE.
-# (LASER3 was evaluated but is not installable here: laser_encoders -> fairseq
-# is incompatible with Python 3.12 / torch 2.x. See README.)
-EMBEDS = ("labse", "sonar")
+# (LASER3 needs laser_encoders -> fairseq v1, which can't coexist with
+# Python 3.12 / torch 2.x; it runs ONLY in the dedicated legacy Modal image
+# `laser_image` -- Python 3.10 + torch 1.13 + fairseq 0.12.2. See README.)
+EMBEDS = ("labse", "sonar", "laser")
 
 
 def labse_embed_fn(labse_model):
@@ -57,5 +58,43 @@ def sonar_embed_fn(lang: str, device: str = "cpu"):
         vecs = np.asarray(vecs, dtype=np.float32)
         norms = np.linalg.norm(vecs, axis=1, keepdims=True)
         return vecs / (norms + 1e-8)
+
+    return embed
+
+
+@lru_cache(maxsize=None)
+def _laser_pipeline(lang: str, model_dir: str | None):
+    """Build (and cache) a LASER3 encoder pipeline for FLORES-200 code ``lang``.
+
+    LASER3 is per-language: low-resource langs (e.g. kmr_Latn) get a dedicated
+    encoder, while the 93 LASER2 languages (incl. tur_Latn, eng_Latn) share the
+    base encoder. laser_encoders downloads models to ``~/.cache/laser_encoders``
+    unless ``model_dir`` is given (we point it at the Modal volume). Needs
+    fairseq v1, so it only imports inside the dedicated ``laser_image``.
+    """
+    from laser_encoders import LaserEncoderPipeline
+
+    kwargs = {"lang": lang}
+    if model_dir:
+        kwargs["model_dir"] = model_dir
+    return LaserEncoderPipeline(**kwargs)
+
+
+def laser_embed_fn(lang: str, model_dir: str | None = None):
+    """Return an embed function backed by LASER3 for FLORES-200 code ``lang``.
+
+    ``model_dir`` defaults to ``$LASER_MODEL_DIR`` so the Modal remote can cache
+    model downloads on the volume. encode_sentences does its own L2 normalization
+    (``normalize_embeddings=True``), matching the other embed fns' unit vectors.
+    """
+    import os
+
+    import numpy as np
+
+    pipeline = _laser_pipeline(lang, model_dir or os.environ.get("LASER_MODEL_DIR"))
+
+    def embed(lines: list[str]):
+        vecs = pipeline.encode_sentences(lines, normalize_embeddings=True)
+        return np.asarray(vecs, dtype=np.float32)
 
     return embed

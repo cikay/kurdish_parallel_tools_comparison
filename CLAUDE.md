@@ -62,6 +62,11 @@ tgt_sents, src_lang, tgt_lang)` dispatches to:
   - `--embed sonar` → `sonar_embed_fn(lang, device)` per side, one cached SONAR
     pipeline (`_sonar_pipeline`); `lang` is the dataset key (a FLORES-200 code)
     passed as SONAR's `source_lang`. SONAR natively covers kmr_Latn + ckb_Arab.
+  - `--embed laser` → `laser_embed_fn(lang)` per side, one cached LASER3
+    pipeline (`_laser_pipeline`); `lang` is the dataset key (FLORES-200 code).
+    LASER3 has a dedicated kmr_Latn encoder; tur/eng use the LASER2 base.
+    `encode_sentences(..., normalize_embeddings=True)` returns unit vectors.
+    **Legacy stack — Modal `laser_image` only** (fairseq v1); see below.
 
 There is **no intrinsic scoring** of alignments. Output records carry only the
 aligned `pairs` (plus metadata); quality is judged against an external gold set.
@@ -89,19 +94,32 @@ out** of the comparison — do not re-add it without a reason:
 If embedding diversity ever matters more than install cost, the thing to add is
 a *different embedding*, not another LaBSE aligner.
 
-### Two Modal images (don't merge them)
+### Three Modal images (don't merge them)
 
 - `labse_image`: bertalign (`Python>=3.12`) + vecalign + sentence-transformers.
 - `sonar_image`: vecalign + `sonar-space` (fairseq2) + sentence-transformers,
   **no bertalign**. SONAR's fairseq2 asset cache goes to the volume via
-  `XDG_CACHE_HOME`. The entrypoint dispatches `--embed sonar` to
-  `align_sonar_remote`, everything else to `align_labse_remote`; both call the
-  shared `_run_alignment`.
+  `XDG_CACHE_HOME`.
+- `laser_image`: vecalign + `laser_encoders` (LASER3) on a **legacy base**
+  (`Python 3.10` + `torch==1.13.1` + `fairseq==0.12.2`), **no bertalign**.
+  sentence-transformers `2.2.2` loads LaBSE for scoring only. LASER3 model
+  downloads cache on the volume via `LASER_MODEL_DIR`. `torch==1.13.1` is the
+  CUDA 11.7 build and LASER3 self-moves to GPU when one is attached, so run it
+  on a **T4** (`--gpu T4`); an **L4** (Ada) needs CUDA >=11.8 and won't work with
+  this torch. This is the fragile image — its pins are a self-consistent set
+  (fairseq v1 needs `numpy<1.24`; s-t 2.2.2 needs `huggingface-hub<0.26`); don't
+  bump them casually.
+
+The entrypoint dispatches `--embed sonar` → `align_sonar_remote`, `--embed
+laser` → `align_laser_remote`, everything else → `align_labse_remote`; all call
+the shared `_run_alignment`.
 
 Installs: vecalign from git (`@main`) compiles a Cython extension (`dp_core`) →
-images need `build-essential` + `git`, local needs Xcode CLT. **LASER3 is NOT
-usable** (`laser_encoders` → fairseq v1, incompatible with Python 3.12/torch 2.x
-and bertalign). SONAR is the replacement but is **CC-BY-NC** (non-commercial).
+images need `build-essential` + `git`, local needs Xcode CLT. **LASER3 can't
+share the other two images** (`laser_encoders` → fairseq v1 is incompatible with
+Python 3.12/torch 2.x, bertalign, and fairseq2), so it runs only in its own
+legacy `laser_image`. SONAR remains the modern replacement but is **CC-BY-NC**
+(non-commercial); LASER3 (BSD) is the commercially-usable embedding option.
 
 ## Running
 
