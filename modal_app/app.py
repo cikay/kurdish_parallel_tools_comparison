@@ -234,6 +234,8 @@ def _run_alignment(subset: str, src: str, targets: list[str], n: int,
                     "n_tgt_sents": len(tgt_sents),
                     "src_summary": src_text,
                     "tgt_summary": target_texts[tgt],
+                    "src_sents": src_sents,
+                    "tgt_sents": tgt_sents,
                     "align_seconds": round(align_seconds, 3),
                     "pairs": [{"src": s, "tgt": t} for s, t in pairs],
                 })
@@ -325,9 +327,13 @@ def main(n: int, gpu: str = "T4", device: str = "auto"):
     # worth hand-annotating for the gold set. Segmentation is identical across
     # options, so comparing bead lists directly is valid; an option's alignment
     # of one (thesis, target) is signed by its tuple of (src, tgt) beads.
+    def numbered(sents):
+        # 0-based index per sentence, matching the indices the gold `links` use.
+        return [{"i": i, "text": s} for i, s in enumerate(sents)]
+
     by_thesis: dict = {}
-    meta: dict = {}         # tez_id -> {title, src_summary (Kurmanji, shared by targets)}
-    tgt_summary: dict = {}  # (tez_id, tgt_lang) -> raw target summary
+    meta: dict = {}      # tez_id -> {title, src_summary, src_sents} (Kurmanji, shared)
+    tgt_info: dict = {}  # (tez_id, tgt_lang) -> {tgt_summary, tgt_sents}
     for out in outs:
         option = f"{out['tool']}_{out['embed']}"
         for record in out["records"]:
@@ -335,8 +341,11 @@ def main(n: int, gpu: str = "T4", device: str = "auto"):
             sig = tuple((p["src"], p["tgt"]) for p in record["pairs"])
             by_thesis.setdefault(tez_id, {}).setdefault(tgt_lang, {})[option] = sig
             meta.setdefault(tez_id, {"title": record.get("title"),
-                                     "src_summary": record["src_summary"]})
-            tgt_summary.setdefault((tez_id, tgt_lang), record["tgt_summary"])
+                                     "src_summary": record["src_summary"],
+                                     "src_sents": record["src_sents"]})
+            tgt_info.setdefault((tez_id, tgt_lang),
+                                {"tgt_summary": record["tgt_summary"],
+                                 "tgt_sents": record["tgt_sents"]})
 
     differing = []
     n_pairs = n_diff_pairs = 0
@@ -350,9 +359,11 @@ def main(n: int, gpu: str = "T4", device: str = "auto"):
             groups: dict = {}
             for option, sig in opt_sigs.items():
                 groups.setdefault(sig, []).append(option)
+            info = tgt_info[(tez_id, tgt_lang)]
             diff_targets.append({
                 "tgt_lang": tgt_lang,
-                "tgt_summary": tgt_summary[(tez_id, tgt_lang)],
+                "tgt_summary": info["tgt_summary"],
+                "tgt_sents": numbered(info["tgt_sents"]),
                 "n_distinct_alignments": len(groups),
                 "agreeing_options": sorted((sorted(o) for o in groups.values()),
                                            key=len, reverse=True),
@@ -361,7 +372,8 @@ def main(n: int, gpu: str = "T4", device: str = "auto"):
             differing.append({
                 "tez_id": tez_id,
                 "title": meta[tez_id]["title"],
-                "src_summary": meta[tez_id]["src_summary"],  # Kurmanji, fixed across options
+                "src_summary": meta[tez_id]["src_summary"],   # Kurmanji, fixed across options
+                "src_sents": numbered(meta[tez_id]["src_sents"]),
                 "targets": diff_targets,
             })
     differing.sort(key=lambda d: str(d["tez_id"]))
