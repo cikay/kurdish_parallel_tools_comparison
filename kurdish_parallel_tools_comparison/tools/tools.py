@@ -13,8 +13,12 @@ TOOLS = ("bertalign", "vecalign", "sentalign")
 
 
 def align_bertalign(encoder, src_sents: list[str], tgt_sents: list[str],
-                    max_align: int = 5) -> list[tuple[str, str]]:
-    """Align with Bertalign (two-pass LaBSE DP). Returns (src, tgt) text beads."""
+                    max_align: int = 4) -> list[tuple[str, str]]:
+    """Align with Bertalign (two-pass LaBSE DP). Returns (src, tgt) text beads.
+
+    ``max_align=4`` (Bertalign's own default is 5) matches Vecalign's cap so the
+    two DPs are compared under the same max bead size, not different ones.
+    """
     from bertalign import Bertalign
 
     aligner = Bertalign(
