@@ -16,8 +16,12 @@ that carry all three abstracts). Reuses the local ``align.py`` logic (shipped
 into each image). Alignment quality is judged against the external gold set, not
 an intrinsic score.
 
-Three images, because the dependency stacks don't mix (one spawn each; the three
-LaBSE tools share the one labse_image container, so LaBSE loads once):
+Segmentation is a SINGLE shared step: segment_remote splits the n theses ONCE
+with wtpsplit SaT and the identical sentence lists are handed to all three
+alignment images, so no image re-splits and the five options are byte-identical
+on input. Four images, because the dependency stacks don't mix (one spawn each;
+the three LaBSE tools share the one labse_image container, so LaBSE loads once):
+  * seg_image    - wtpsplit SaT only (CPU); the shared segmentation step.
   * labse_image  - bertalign (needs Python>=3.12) + vecalign + sentalign; LaBSE.
   * sonar_image  - vecalign + SONAR (fairseq2); no bertalign.
   * laser_image  - vecalign + LASER3 (laser_encoders -> fairseq v1) on a LEGACY
@@ -59,9 +63,29 @@ cache_volume = modal.Volume.from_name(CACHE_VOLUME_NAME, create_if_missing=True)
 # Vecalign builds a Cython extension -> needs a C compiler and git.
 _base = modal.Image.debian_slim(python_version="3.12").apt_install("build-essential", "git")
 
+# Segmentation stack: wtpsplit SaT only. Segmentation is a SINGLE shared step run
+# once (segment_remote), and its sentence lists are handed to all three alignment
+# images -- so SaT lives here alone and never has to coexist with bertalign,
+# fairseq2, or the fragile legacy fairseq-v1 (laser) stack. CPU is plenty for the
+# small model on abstract-sized text. The SaT model caches to the volume via HF_HOME.
+seg_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    # torch must be installed explicitly: wtpsplit treats it as OPTIONAL (it also
+    # has an ONNX path), so neither it nor transformers pulls it in. SaT runs on
+    # CPU here, but the default PyPI wheel (CUDA-enabled) is fine on CPU too.
+    # transformers is pinned alongside wtpsplit because it governs huggingface-hub.
+    .pip_install("wtpsplit==2.2.2", "torch==2.15.0", "transformers==5.22.2",
+                 "huggingface-hub==2.4.0", "pandas==2.2.3", "pyarrow==18.1.0")
+    .env({"HF_HOME": f"{CACHE_PATH}/huggingface"})
+    .add_local_dir(str(LOCAL_PKG), f"{REMOTE_SRC_DIR}/kurdish_parallel_tools_comparison")
+)
+
 # LaBSE stack: bertalign (pulls sentence-transformers + torch) + vecalign.
+# sentence-transformers is pinned explicitly because it governs huggingface-hub
+# (bertalign itself leaves it unpinned); torch comes in via sentence-transformers.
 labse_image = (
-    _base.pip_install("bertalign==2.0.1", "pandas", "pyarrow", "huggingface-hub")
+    _base.pip_install("bertalign==2.0.1", "sentence-transformers==6.2.0",
+                      "huggingface-hub==2.4.0", "pandas==2.2.3", "pyarrow==18.1.0")
     .pip_install("git+https://github.com/thompsonb/vecalign.git@main")
     .env({"HF_HOME": f"{CACHE_PATH}/huggingface"})
     .add_local_dir(str(LOCAL_PKG), f"{REMOTE_SRC_DIR}/kurdish_parallel_tools_comparison")
@@ -89,9 +113,8 @@ sonar_image = (
         "fairseq2==0.8.1",
         "sonar-space==0.5.0",
         "huggingface-hub~=0.32",
-        "sentence-splitter",  # align.py:split_sentences (bertalign provides it in the other image)
-        "pandas",
-        "pyarrow",
+        "pandas==2.2.3",
+        "pyarrow==18.1.0",
     )
     .pip_install("git+https://github.com/thompsonb/vecalign.git@main")
     .env({"HF_HOME": f"{CACHE_PATH}/huggingface"})
@@ -126,9 +149,8 @@ laser_image = (
         "huggingface-hub==0.16.4",
         "transformers==4.30.2",
         "sentence-transformers==2.2.2",
-        "sentence-splitter",  # align.py:split_sentences
-        "pandas",
-        "pyarrow",
+        "pandas==2.0.3",    # last pandas supporting numpy<1.24 / py3.10
+        "pyarrow==12.0.1",  # compatible with numpy 1.23.5 + py3.10
         "setuptools>=74",  # vecalign build backend (see run_commands below)
         "Cython>=3.1",
     )
@@ -148,15 +170,17 @@ laser_image = (
 )
 
 
-def _run_alignment(subset: str, src: str, targets: list[str], n: int,
-                   device: str, runs: list[tuple[str, str]]) -> list[dict]:
-    """Shared remote body: load models once, align the SAME n theses with every
-    ``(tool, embed)`` in ``runs``, and return one result dict per run.
+def _run_alignment(prepared: list[dict], src: str, device: str,
+                   runs: list[tuple[str, str]]) -> list[dict]:
+    """Shared remote body: load models once, align the ALREADY-SEGMENTED theses
+    in ``prepared`` with every ``(tool, embed)`` in ``runs``, and return one
+    result dict per run.
 
-    Running several runs in one container is deliberate: it loads LaBSE once and
-    splits each abstract once, so all LaBSE tools (bertalign/vecalign/sentalign)
-    see identical segmentation on identical theses -- exactly the determinism the
-    gold-set comparison needs.
+    ``prepared`` comes from the single shared segmentation step (segment_remote
+    -> ``align.prepare_theses``), so every image -- and every run within an image
+    -- aligns byte-identical sentence lists. That is the determinism the gold-set
+    comparison needs; this body no longer loads the dataset or splits anything.
+    Running several runs in one container still loads LaBSE once.
     """
     import os
     import sys
@@ -194,29 +218,12 @@ def _run_alignment(subset: str, src: str, targets: list[str], n: int,
         labse_model = SentenceTransformer("LaBSE", device=dev)
     load_seconds = time.perf_counter() - t0
 
-    df = A.load_rows(subset)
-
     per_run = {run: [] for run in runs}
-    theses_done = 0
-    for _, row in df.iterrows():
-        if theses_done >= n:
-            break
-        src_text = A.get_summary(row, src)
-        target_texts = {t: A.get_summary(row, t) for t in targets}
-        if not src_text or any(not v for v in target_texts.values()):
-            continue
-        src_sents = A.split_sentences(src_text, src)
-        if not src_sents:
-            continue
-
-        # Split each target ONCE; reused by every run so segmentation is identical.
-        tgt_sents_map = {t: A.split_sentences(target_texts[t], t) for t in targets}
-
+    for thesis in prepared:
+        src_sents = thesis["src_sents"]
         for tool, embed in runs:
-            for tgt in targets:
-                tgt_sents = tgt_sents_map[tgt]
-                if not tgt_sents:
-                    continue
+            for tgt, info in thesis["targets"].items():
+                tgt_sents = info["tgt_sents"]
 
                 t1 = time.perf_counter()
                 pairs = A.align_pair(tool, embed, labse_model, src_sents, tgt_sents,
@@ -224,22 +231,21 @@ def _run_alignment(subset: str, src: str, targets: list[str], n: int,
                 align_seconds = time.perf_counter() - t1
 
                 per_run[(tool, embed)].append({
-                    "tez_id": row.get("tez_id"),
-                    "title": row.get("title"),
+                    "tez_id": thesis.get("tez_id"),
+                    "title": thesis.get("title"),
                     "tool": tool,
                     "embed": embed,
                     "src_lang": src,
                     "tgt_lang": tgt,
                     "n_src_sents": len(src_sents),
                     "n_tgt_sents": len(tgt_sents),
-                    "src_summary": src_text,
-                    "tgt_summary": target_texts[tgt],
+                    "src_summary": thesis["src_summary"],
+                    "tgt_summary": info["tgt_summary"],
                     "src_sents": src_sents,
                     "tgt_sents": tgt_sents,
                     "align_seconds": round(align_seconds, 3),
                     "pairs": [{"src": s, "tgt": t} for s, t in pairs],
                 })
-        theses_done += 1
 
     cache_volume.commit()  # persist HF / SONAR caches for fast reruns
     return [
@@ -248,34 +254,50 @@ def _run_alignment(subset: str, src: str, targets: list[str], n: int,
             "tool": tool,
             "embed": embed,
             "model_load_seconds": round(load_seconds, 2),
-            "n_theses": theses_done,
+            "n_theses": len(prepared),
             "records": per_run[(tool, embed)],
         }
         for tool, embed in runs
     ]
 
 
-# The three LaBSE tools share one container: LaBSE loads once, each abstract is
-# split once, so bertalign/vecalign/sentalign see identical segmentation.
+@app.function(image=seg_image, volumes={CACHE_PATH: cache_volume}, timeout=60 * 30)
+def segment_remote(subset, src, targets, n) -> list[dict]:
+    """The single shared segmentation step: split the first ``n`` usable theses
+    ONCE with SaT and return their sentence lists for every alignment image to
+    reuse. Runs on CPU (no GPU) -- SaT's small model is fast on abstract text."""
+    import sys
+
+    sys.path.insert(0, REMOTE_SRC_DIR)
+    import kurdish_parallel_tools_comparison.align as A
+
+    prepared = A.prepare_theses(subset, src, list(targets), n,
+                                require_all_targets=True)
+    cache_volume.commit()  # persist the downloaded SaT model for fast reruns
+    return prepared
+
+
+# The three LaBSE tools share one container so LaBSE loads once; all of them (and
+# the other two images) align the identical pre-segmented sentence lists.
 LABSE_RUNS = [("bertalign", "labse"), ("vecalign", "labse"), ("sentalign", "labse")]
 
 
 @app.function(image=labse_image, volumes={CACHE_PATH: cache_volume}, timeout=60 * 60)
-def align_labse_remote(src, targets, subset, n, device) -> list[dict]:
-    return _run_alignment(subset, src, targets, n, device, LABSE_RUNS)
+def align_labse_remote(prepared, src, device) -> list[dict]:
+    return _run_alignment(prepared, src, device, LABSE_RUNS)
 
 
 @app.function(image=sonar_image, volumes={CACHE_PATH: cache_volume}, timeout=60 * 60)
-def align_sonar_remote(src, targets, subset, n, device) -> list[dict]:
-    return _run_alignment(subset, src, targets, n, device, [("vecalign", "sonar")])
+def align_sonar_remote(prepared, src, device) -> list[dict]:
+    return _run_alignment(prepared, src, device, [("vecalign", "sonar")])
 
 
 @app.function(image=laser_image, volumes={CACHE_PATH: cache_volume}, timeout=60 * 60)
-def align_laser_remote(src, targets, subset, n, device) -> list[dict]:
+def align_laser_remote(prepared, src, device) -> list[dict]:
     # torch 1.13.1 here is the CUDA 11.7 build, and LASER3 self-moves to CUDA
     # when a GPU is attached; without one it runs on CPU (slow). Attach a T4
     # (not an L4 -- Ada needs CUDA >=11.8) via --gpu for the fast path.
-    return _run_alignment(subset, src, targets, n, device, [("vecalign", "laser")])
+    return _run_alignment(prepared, src, device, [("vecalign", "laser")])
 
 
 @app.local_entrypoint()
@@ -292,15 +314,21 @@ def main(n: int, gpu: str = "T4", device: str = "auto"):
 
     gpu_option = None if gpu.lower() in {"none", "cpu", ""} else gpu
 
+    # Single shared segmentation step FIRST (blocking): split the n theses once
+    # with SaT, on CPU, and hand the identical sentence lists to every image.
+    prepared = segment_remote.remote(SUBSET, SRC_LANG, TARGET_LANGS, n)
+    print(f"Segmented {len(prepared)} theses "
+          f"({SRC_LANG} -> {', '.join(TARGET_LANGS)}); aligning all five options...")
+
     # Spawn the three images at once (returns immediately) so they run
     # concurrently; the labse container covers bertalign/vecalign/sentalign.
     calls = [
         ("labse", align_labse_remote.with_options(gpu=gpu_option)
-         .spawn(SRC_LANG, TARGET_LANGS, SUBSET, n, device)),
+         .spawn(prepared, SRC_LANG, device)),
         ("sonar", align_sonar_remote.with_options(gpu=gpu_option)
-         .spawn(SRC_LANG, TARGET_LANGS, SUBSET, n, device)),
+         .spawn(prepared, SRC_LANG, device)),
         ("laser", align_laser_remote.with_options(gpu=gpu_option)
-         .spawn(SRC_LANG, TARGET_LANGS, SUBSET, n, device)),
+         .spawn(prepared, SRC_LANG, device)),
     ]
 
     # Gather. One image failing (laser is the fragile one) must not lose the

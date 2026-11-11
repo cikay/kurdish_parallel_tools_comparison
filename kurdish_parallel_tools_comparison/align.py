@@ -9,8 +9,12 @@ sentences, and aligns them with the selected tool/embedding.
 Why we pre-split and pass is_split=True (Bertalign): its bundled language
 detector and sentence splitter only know ~25 European languages, so Kurdish
 would be mislabelled and mis-split. LaBSE itself is multilingual and embeds
-Kurdish fine, so we do the segmentation ourselves (Turkish splitter as a proxy
-for the Latin-script Kurdish variants) and let the tool do only the alignment.
+Kurdish fine, so we do the segmentation ourselves -- with wtpsplit's SaT, a
+neural multilingual segmenter that is language-agnostic (no per-language model,
+handles Latin- and Arabic-script Kurdish alike) -- and let the tool do only the
+alignment. Segmentation is done ONCE per run (see ``prepare_theses``) and the
+sentence lists are reused by every tool/embedding, so the comparison is exactly
+deterministic.
 
 This module is the data + CLI layer. The alignment algorithms and embedding
 models live in the ``tools`` package and are re-exported below so existing
@@ -29,7 +33,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 import time
 from pathlib import Path
 
@@ -51,16 +54,13 @@ from .tools.tools import (  # noqa: F401
 
 REPO_ID = "muzaffercky/kurdish-theses-yok"
 
-# Dataset summary key -> sentence-splitter language code.
-# Kurdish variants have no dedicated splitter; Turkish ("tr") is the closest
-# Latin-script proxy (shared punctuation and abbreviation conventions).
-SPLITTER_LANG = {
-    "kmr_Latn": "tr",   # Kurmanji (Latin)
-    "zza_Latn": "tr",   # Zazaki (Latin)
-    "tur_Latn": "tr",   # Turkish
-    "eng_Latn": "en",   # English
-    # ckb_Arab / *_Arab handled by a regex fallback (no splitter model).
-}
+# wtpsplit SaT model used for segmentation. "sat-12l-sm" is the largest
+# general-purpose checkpoint (12 layers + limited lookahead): the most accurate
+# of the SaT family, still fast enough to run on CPU for abstract-sized text.
+# (The smaller "sat-3l-sm" over-split some Kurmanji sentences; 12l segments them
+# cleanly.) It is language-agnostic -- no per-language code is needed -- which is
+# exactly why it fits Kurdish, for which no dedicated sentence splitter exists.
+SAT_MODEL_NAME = "sat-12l-sm"
 
 # Fixed CLI pairing: Kurmanji is the source, every OTHER summary language is a
 # target. Rows missing a given abstract are skipped for that target.
@@ -84,22 +84,51 @@ def resolve_device(requested: str) -> str:
     return "cpu"
 
 
-def split_sentences(text: str, key: str) -> list[str]:
-    """Split one abstract into sentences based on its language key."""
-    text = text.strip()
-    if not text:
+_SAT_MODEL = None  # cached wtpsplit SaT instance (load once, reuse everywhere)
+
+
+def get_sat_model(device: str | None = None):
+    """Load (once) and return the shared SaT segmenter.
+
+    Cached at module scope so the model loads a single time per process. Moved to
+    CUDA (half precision) only when a CUDA device is given; on CPU/MPS it stays on
+    CPU -- the small model segments abstract-sized text quickly there, and
+    wtpsplit does not target MPS.
+    """
+    global _SAT_MODEL
+    if _SAT_MODEL is None:
+        from wtpsplit import SaT
+
+        _SAT_MODEL = SaT(SAT_MODEL_NAME)
+        if device == "cuda":
+            _SAT_MODEL.half().to("cuda")
+    return _SAT_MODEL
+
+
+def _clean_sentence(s: str) -> str:
+    """Collapse every whitespace run (incl. newlines) to a single space.
+
+    Guarantees no sentence carries an embedded line break. Besides tidying the
+    text, this is what makes it safe to round-trip sentences through Bertalign's
+    ``is_split=True`` path (``"\\n".join(sents)`` then ``str.splitlines()``):
+    ``splitlines`` breaks on more than ``\\n`` (``\\r``, ``\\v``, ``\\f``, NEL,
+    ``\\u2028``/``\\u2029`` ...), so an embedded one would silently desync
+    Bertalign's segmentation from the shared one.
+    """
+    return " ".join(s.split())
+
+
+def split_sentences(text: str, key: str | None = None, model=None) -> list[str]:
+    """Split one abstract into sentences with wtpsplit SaT.
+
+    SaT is language-agnostic, so ``key`` is accepted for call-site compatibility
+    but no longer selects a model. ``model`` lets callers pass an already-loaded
+    SaT instance (e.g. one placed on a GPU); it defaults to the shared cached one.
+    """
+    if not text or not text.strip():
         return []
-    if key.endswith("_Arab"):
-        # No splitter model for Arabic-script text; split on sentence-final
-        # punctuation (Latin + Arabic question mark/full stop) and newlines.
-        parts = re.split(r"(?<=[.!?؟۔])\s+|\n+", text)
-        return [p.strip() for p in parts if p.strip()]
-
-    from sentence_splitter import SentenceSplitter
-
-    lang = SPLITTER_LANG.get(key, "en")
-    splitter = SentenceSplitter(language=lang)
-    return [s.strip() for s in splitter.split(text) if s.strip()]
+    sat = model or get_sat_model()
+    return [c for s in sat.split(text) if (c := _clean_sentence(s))]
 
 
 def load_rows(subset: str):
@@ -126,6 +155,60 @@ def get_summary(row, key: str):
         return None
     value = str(value).strip()
     return value or None
+
+
+def prepare_theses(subset: str, src: str, targets: list[str], n: int | None,
+                   require_all_targets: bool = True, model=None) -> list[dict]:
+    """Segment the first ``n`` usable theses ONCE and return their sentences.
+
+    This is the single shared segmentation step: it loads the subset, selects
+    theses, and splits the Kurmanji source plus each target abstract, so every
+    tool/embedding downstream aligns the *identical* sentence lists. The result
+    is a plain, serializable structure (safe to ship to remote workers):
+
+        [{"tez_id", "title", "src_summary", "src_sents",
+          "targets": {tgt_lang: {"tgt_summary", "tgt_sents"}}}, ...]
+
+    A thesis needs a Kurmanji abstract that segments. With
+    ``require_all_targets`` (the comparison default) a thesis is kept only when
+    every requested target is present and segments; otherwise targets are kept
+    individually and theses with at least one usable target are included.
+    ``n=None`` means no limit (the whole subset).
+    """
+    df = load_rows(subset)
+    sat = model or get_sat_model()
+    prepared: list[dict] = []
+    for _, row in df.iterrows():
+        if n is not None and len(prepared) >= n:
+            break
+        src_text = get_summary(row, src)
+        if not src_text:
+            continue
+        target_texts = {t: get_summary(row, t) for t in targets}
+        if require_all_targets and any(not v for v in target_texts.values()):
+            continue
+        src_sents = split_sentences(src_text, src, model=sat)
+        if not src_sents:
+            continue
+        tgt_entries: dict = {}
+        for t in targets:
+            tgt_text = target_texts[t]
+            if not tgt_text:
+                continue
+            tgt_sents = split_sentences(tgt_text, t, model=sat)
+            if not tgt_sents:
+                continue
+            tgt_entries[t] = {"tgt_summary": tgt_text, "tgt_sents": tgt_sents}
+        if not tgt_entries:
+            continue
+        prepared.append({
+            "tez_id": row.get("tez_id"),
+            "title": row.get("title"),
+            "src_summary": src_text,
+            "src_sents": src_sents,
+            "targets": tgt_entries,
+        })
+    return prepared
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -194,32 +277,17 @@ def align_one(tool: str, embed: str, labse_model, bert_encoder, device: str,
     }
 
 
-def align_row(row, tool: str, embed: str, labse_model, bert_encoder,
-              device: str) -> list[dict]:
-    """Align Kurmanji against every target language present in one row.
-
-    Returns one record per target that has a usable abstract; an empty list if
-    the row has no Kurmanji abstract or it doesn't segment.
-    """
-    src_text = get_summary(row, SRC_LANG)
-    if not src_text:
-        return []
-    src_sents = split_sentences(src_text, SRC_LANG)
-    if not src_sents:
-        return []
-
-    tez_id = row.get("tez_id")
-    title = row.get("title")
+def align_thesis(thesis: dict, tool: str, embed: str, labse_model, bert_encoder,
+                 device: str) -> list[dict]:
+    """Align one already-segmented thesis (from ``prepare_theses``) against each
+    of its target languages. Returns one record per target."""
+    src_sents = thesis["src_sents"]
+    tez_id = thesis.get("tez_id")
+    title = thesis.get("title")
     records = []
-    for tgt in TARGET_LANGS:
-        tgt_text = get_summary(row, tgt)
-        if not tgt_text:
-            continue
-        tgt_sents = split_sentences(tgt_text, tgt)
-        if not tgt_sents:
-            continue
+    for tgt, info in thesis["targets"].items():
         records.append(align_one(tool, embed, labse_model, bert_encoder, device,
-                                 src_sents, tgt_sents, tez_id, title, tgt))
+                                 src_sents, info["tgt_sents"], tez_id, title, tgt))
     return records
 
 
@@ -255,34 +323,33 @@ def main() -> None:
     device = resolve_device("auto")
     print(f"Device: {device} | tool: {args.tool} | embed: {args.embed}")
 
+    # Single shared segmentation step: split every thesis ONCE (SaT), up front.
+    t0 = time.perf_counter()
+    n = None if args.is_full else args.n
+    prepared = prepare_theses(args.subset, SRC_LANG, list(TARGET_LANGS), n,
+                              require_all_targets=False,
+                              model=get_sat_model(device))
+    print(f"Segmented {len(prepared)} theses in {time.perf_counter() - t0:.1f}s")
+
     t0 = time.perf_counter()
     labse_model, bert_encoder = load_labse_and_encoder(args.tool, args.embed, device)
     print(f"Loaded models in {time.perf_counter() - t0:.1f}s\n")
-
-    df = load_rows(args.subset)
 
     suffix = "full" if args.is_full else str(args.n)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = RESULTS_DIR / f"{args.tool}_{args.embed}_{suffix}.jsonl"
 
-    theses_done = 0
     records_written = 0
     with out_path.open("w", encoding="utf-8") as fh:
-        for _, row in df.iterrows():
-            if not args.is_full and theses_done >= args.n:
-                break
-            records = align_row(row, args.tool, args.embed, labse_model,
-                                bert_encoder, device)
-            if not records:
-                continue
-            for record in records:
+        for thesis in prepared:
+            for record in align_thesis(thesis, args.tool, args.embed, labse_model,
+                                       bert_encoder, device):
                 print_record(record, show_beads=not args.is_full)
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
                 records_written += 1
-            theses_done += 1
 
     print(f"Wrote {records_written} records "
-          f"({theses_done} theses x up to {len(TARGET_LANGS)} targets) "
+          f"({len(prepared)} theses x up to {len(TARGET_LANGS)} targets) "
           f"to {out_path.resolve()}")
 
 
