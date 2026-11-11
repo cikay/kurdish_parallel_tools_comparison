@@ -25,9 +25,7 @@ dist/
 htmlcov/
 
 # Generated alignment outputs
-results/*.jsonl
-results/*.json
-
+data/
 # Caches
 .cache/
 .mypy_cache/

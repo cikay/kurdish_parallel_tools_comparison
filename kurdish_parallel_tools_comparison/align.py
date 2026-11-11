@@ -67,8 +67,8 @@ SAT_MODEL_NAME = "sat-12l-sm"
 SRC_LANG = "kmr_Latn"
 TARGET_LANGS = ("zza_Latn", "ckb_Arab", "tur_Latn", "eng_Latn")
 
-# Local outputs live in results/ (repo root is the package's parent).
-RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
+# Local outputs live in data/ (repo root is the package's parent).
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
 def resolve_device(requested: str) -> str:
@@ -336,8 +336,8 @@ def main() -> None:
     print(f"Loaded models in {time.perf_counter() - t0:.1f}s\n")
 
     suffix = "full" if args.is_full else str(args.n)
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = RESULTS_DIR / f"{args.tool}_{args.embed}_{suffix}.jsonl"
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = DATA_DIR / f"{args.tool}_{args.embed}_{suffix}.jsonl"
 
     records_written = 0
     with out_path.open("w", encoding="utf-8") as fh:

@@ -33,7 +33,7 @@ the three LaBSE tools share the one labse_image container, so LaBSE loads once):
     modal run modal_app/app.py --n 50 --gpu L4   # ...on a bigger GPU
     modal run modal_app/app.py --n 10 --gpu none # ...on CPU (slow)
 
-Output: one file per option, results/{tool}_{embed}_smoke_{n}.jsonl, one record
+Output: one file per option, data/{tool}_{embed}_smoke_{n}.jsonl, one record
 per thesis-and-target, with the aligned `pairs`.
 """
 
@@ -342,11 +342,11 @@ def main(n: int, gpu: str = "T4", device: str = "auto"):
             failures.append(f"{label}: {exc}")
             print(f"\n!!! {label} image FAILED: {exc}\n")
 
-    results_dir = REPO_ROOT / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
+    data_dir = REPO_ROOT / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
 
     for out in outs:
-        out_path = results_dir / f"{out['tool']}_{out['embed']}_{n}.jsonl"
+        out_path = data_dir / f"{out['tool']}_{out['embed']}_{n}.jsonl"
         with out_path.open("w", encoding="utf-8") as fh:
             for record in out["records"]:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -413,7 +413,7 @@ def main(n: int, gpu: str = "T4", device: str = "auto"):
         "n_differing_pairs": n_diff_pairs,
         "differing": differing,
     }
-    result_path = results_dir / f"result_{n}.json"
+    result_path = data_dir / f"result_{n}.json"
     with result_path.open("w", encoding="utf-8") as fh:
         json.dump(result, fh, ensure_ascii=False, indent=2)
 

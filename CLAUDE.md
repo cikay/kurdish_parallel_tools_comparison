@@ -161,7 +161,7 @@ pipenv run python -m kurdish_parallel_tools_comparison.align --n 3   # kmr_Latn 
   `--n` is required unless `--is-full` is passed (full subset, ignores `--n`).
   Source is fixed (`SRC_LANG = kmr_Latn`) and every other summary language
   (`TARGET_LANGS`) is a target; device is always `resolve_device("auto")`. (No
-  `--src/--tgt/--device/--out` — removed; outputs always go to `results/`.)
+  `--src/--tgt/--device/--out` — removed; outputs always go to `data/`.)
 
 Modal comparison run (recommended; no local torch, runs on a GPU, both pairs).
 **One command runs all five options concurrently on the same `n` theses** — the
@@ -188,12 +188,12 @@ modal run modal_app/app.py --n 20
 
 ## Conventions
 
-- Output files go in `results/`.
+- Output files go in `data/`.
   - Local CLI: `{tool}_{embed}_{n}.jsonl`, or `{tool}_{embed}_full.jsonl` with
     `--is-full`. Source is fixed (kmr_Latn) and all targets go in one file,
     so src/tgt are no longer in the name. NOTE: the `…_full.jsonl` form matches
     the Modal full name — local covers all `TARGET_LANGS`, Modal only tur+eng, so
-    don't mix them in the same `results/`.
+    don't mix them in the same `data/`.
   - Modal comparison run: `{tool}_{embed}_{n}.jsonl`, one file per option (five
     files: `bertalign_labse_`, `vecalign_labse_`, `sentalign_labse_`,
     `vecalign_sonar_`, `vecalign_laser_`), one record per thesis-and-target.
