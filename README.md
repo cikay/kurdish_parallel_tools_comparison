@@ -42,7 +42,7 @@ tool/embedding aligns the identical sentence lists. See
 | `kurdish_parallel_tools_comparison/tools/embeddings.py` | Embedding models (LaBSE, SONAR, LASER3). |
 | `modal_app/app.py` | Modal run — runs all five options on a GPU, no local torch. Imports the package. |
 | `Pipfile` | Local dependencies (bertalign, vecalign, pandas, pyarrow, huggingface-hub). |
-| `data/` | Output JSONL files. |
+| `data/{sat_model}/` | Output JSONL files, nested under the SaT model used to segment. |
 
 ## Three aligners, three embedding models (five options)
 
@@ -93,9 +93,9 @@ Every option aligns the identical `n` theses with identical segmentation, so the
 comparison is deterministic. `--gpu` drives every option and defaults to `T4`
 (LASER3's torch 1.13 needs it; an L4 won't work).
 
-Output: one file per option, `data/{tool}_{embed}_{n}.jsonl` (five files),
-each one record per thesis-and-target with aligned `pairs` and timing, plus
-`data/result_{n}.json` — the (thesis, target) pairs whose alignment **differs
+Output: one file per option, `data/{sat_model}/{tool}_{embed}_{n}.jsonl` (five
+files), each one record per thesis-and-target with aligned `pairs` and timing,
+plus `data/{sat_model}/result_{n}.json` — the (thesis, target) pairs whose alignment **differs
 across ≥ 2 options** (options grouped by identical alignment), i.e. the shortlist
 to hand-annotate for the gold set. The command prints only a short summary; a
 failing image (LASER is the fragile one) is reported but doesn't abort the rest.
@@ -120,8 +120,8 @@ pipenv run python -m kurdish_parallel_tools_comparison.align --is-full          
 `--n` is **required** unless you pass `--is-full` (which aligns the whole subset
 and ignores `--n`). On Apple Silicon the device is auto-selected as **MPS**
 (Metal); the first line of output prints `Device: … | tool: … | embed: …`.
-Output goes to `data/{tool}_{embed}_{n}.jsonl`, or
-`data/{tool}_{embed}_full.jsonl` with `--is-full` — one record per
+Output goes to `data/{sat_model}/{tool}_{embed}_{n}.jsonl`, or
+`data/{sat_model}/{tool}_{embed}_full.jsonl` with `--is-full` — one record per
 thesis-and-target.
 
 ### Local timing (Apple M3, 16 GB, MPS)

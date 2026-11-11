@@ -188,7 +188,8 @@ modal run modal_app/app.py --n 20
 
 ## Conventions
 
-- Output files go in `data/`.
+- Output files go in `data/{SAT_MODEL_NAME}/` (nested under the SaT model used
+  to segment, so different segmenters' runs don't collide).
   - Local CLI: `{tool}_{embed}_{n}.jsonl`, or `{tool}_{embed}_full.jsonl` with
     `--is-full`. Source is fixed (kmr_Latn) and all targets go in one file,
     so src/tgt are no longer in the name. NOTE: the `…_full.jsonl` form matches

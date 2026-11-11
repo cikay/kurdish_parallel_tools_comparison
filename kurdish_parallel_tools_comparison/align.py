@@ -336,8 +336,12 @@ def main() -> None:
     print(f"Loaded models in {time.perf_counter() - t0:.1f}s\n")
 
     suffix = "full" if args.is_full else str(args.n)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = DATA_DIR / f"{args.tool}_{args.embed}_{suffix}.jsonl"
+    # Outputs are nested under the SaT model name, so results from different
+    # segmenters don't collide (segmentation is the one shared input to every
+    # tool/embedding, so it defines the run).
+    out_dir = DATA_DIR / SAT_MODEL_NAME
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{args.tool}_{args.embed}_{suffix}.jsonl"
 
     records_written = 0
     with out_path.open("w", encoding="utf-8") as fh:

@@ -33,7 +33,7 @@ the three LaBSE tools share the one labse_image container, so LaBSE loads once):
     modal run modal_app/app.py --n 50 --gpu L4   # ...on a bigger GPU
     modal run modal_app/app.py --n 10 --gpu none # ...on CPU (slow)
 
-Output: one file per option, data/{tool}_{embed}_smoke_{n}.jsonl, one record
+Output: one file per option, data/{sat_model}/{tool}_{embed}_smoke_{n}.jsonl, one record
 per thesis-and-target, with the aligned `pairs`.
 """
 
@@ -342,7 +342,11 @@ def main(n: int, gpu: str = "T4", device: str = "auto"):
             failures.append(f"{label}: {exc}")
             print(f"\n!!! {label} image FAILED: {exc}\n")
 
-    data_dir = REPO_ROOT / "data"
+    # Nest outputs under the SaT model name: segmentation is the one shared
+    # input to every option, so it defines the run and keeps results from
+    # different segmenters apart.
+    import kurdish_parallel_tools_comparison.align as A
+    data_dir = REPO_ROOT / "data" / A.SAT_MODEL_NAME
     data_dir.mkdir(parents=True, exist_ok=True)
 
     for out in outs:
