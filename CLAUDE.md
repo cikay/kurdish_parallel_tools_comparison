@@ -25,9 +25,17 @@ only know ~25 European languages — **Kurdish is not among them**. But LaBSE
 embeds Kurdish fine. So:
 
 - We **pre-split sentences ourselves** and call `Bertalign(..., is_split=True)`.
-- Kurdish (Latin) is split with the **Turkish** sentence-splitter as a proxy;
-  `*_Arab` keys use a regex fallback. See
-  `kurdish_parallel_tools_comparison/align.py:split_sentences` and `SPLITTER_LANG`.
+- All languages are split with **wtpsplit SaT** (`sat-12l-sm`), a neural
+  multilingual segmenter that is language-agnostic — it covers Kurdish in both
+  Latin and Arabic script, so there is no Turkish-proxy and no `*_Arab` regex
+  fallback any more. See `kurdish_parallel_tools_comparison/align.py:split_sentences`,
+  `get_sat_model`, and `SAT_MODEL_NAME`.
+- Segmentation is a **single shared step**: `align.py:prepare_theses` splits each
+  thesis once and every tool/embedding aligns the *identical* sentence lists
+  (the Modal run does this once in `segment_remote` and ships the result to all
+  three alignment images). Each returned sentence has its whitespace collapsed
+  (`_clean_sentence`), which also keeps bertalign's `is_split=True` round-trip
+  (`"\n".join(sents)` → `splitlines()`) exact.
 - This means language detection quality is irrelevant to results — only
   segmentation matters.
 
@@ -38,7 +46,7 @@ orchestration sits outside it (in `modal_app/`, which imports the package).
 
 | Module | Holds |
 |---|---|
-| `kurdish_parallel_tools_comparison/align.py` | Data load (`load_rows`, `get_summary`), segmentation (`split_sentences`, `SPLITTER_LANG`), `resolve_device`, and the CLI `main`. Re-exports the aligners so `import kurdish_parallel_tools_comparison.align as A` still exposes everything. |
+| `kurdish_parallel_tools_comparison/align.py` | Data load (`load_rows`, `get_summary`), the single shared segmentation step (`split_sentences`, `get_sat_model`, `prepare_theses`), `resolve_device`, and the CLI `main`. Re-exports the aligners so `import kurdish_parallel_tools_comparison.align as A` still exposes everything. |
 | `kurdish_parallel_tools_comparison/tools/tools.py` | Alignment algorithms (`align_bertalign`, `align_vecalign`, `align_sentalign`) + `align_pair` dispatch + `TOOLS`. |
 | `kurdish_parallel_tools_comparison/tools/_sentalign_core.py` | SentAlign's pure-Python grid-DP core, **vendored unmodified** from `steinst/SentAlign` (`align_anchors.py`, Apache-2.0). Called in-process by `align_sentalign`; no Cython/Gale-Church anchoring (not needed at abstract size). |
 | `kurdish_parallel_tools_comparison/tools/embeddings.py` | Embed fns (`labse_embed_fn`, `sonar_embed_fn`, `_sonar_pipeline`) + `EMBEDS`. |
@@ -101,8 +109,13 @@ not vendored and not needed at abstract size. Keep `_sentalign_core.py`
 byte-for-byte as upstream (only the header comment is ours); put any adaptation
 in `align_sentalign`.
 
-### Three Modal images (don't merge them)
+### Four Modal images (don't merge them)
 
+- `seg_image`: **wtpsplit SaT only**, on CPU. The single shared segmentation
+  step (`segment_remote` → `align.prepare_theses`): it splits the `n` theses
+  once and the result is handed to the three alignment images, so SaT never has
+  to coexist with bertalign / fairseq2 / fairseq-v1, and no alignment image
+  re-splits. The SaT model caches on the volume via `HF_HOME`.
 - `labse_image`: bertalign (`Python>=3.12`) + vecalign + sentence-transformers.
   Also runs `sentalign` (pure-Python `_sentalign_core`, no extra deps). The three
   LaBSE tools share one container so LaBSE loads once.
@@ -119,13 +132,16 @@ in `align_sentalign`.
   (fairseq v1 needs `numpy<1.24`; s-t 2.2.2 needs `huggingface-hub<0.26`); don't
   bump them casually.
 
-The entrypoint `main(n, gpu, device)` **spawns all three images at once** and
-waits on them concurrently: `align_labse_remote` (runs bertalign + vecalign +
-sentalign), `align_sonar_remote` (vecalign/sonar), `align_laser_remote`
-(vecalign/laser) — five options total. All call the shared `_run_alignment`,
-which now takes a `runs: list[(tool, embed)]` and aligns the **same `n` theses**
-with each, returning one result dict per run. One image failing (laser is the
-fragile one) is caught per-image so the others still write their output.
+The entrypoint `main(n, gpu, device)` first runs `segment_remote` **once**
+(blocking) to segment the `n` theses, then **spawns the three alignment images
+at once** and waits on them concurrently, passing each the shared `prepared`
+sentence lists: `align_labse_remote` (runs bertalign + vecalign + sentalign),
+`align_sonar_remote` (vecalign/sonar), `align_laser_remote` (vecalign/laser) —
+five options total. All call the shared `_run_alignment`, which takes
+`(prepared, src, device, runs)` — `runs: list[(tool, embed)]` — and aligns the
+identical pre-segmented theses, returning one result dict per run. It no longer
+loads the dataset or splits anything. One image failing (laser is the fragile
+one) is caught per-image so the others still write their output.
 
 Installs: vecalign from git (`@main`) compiles a Cython extension (`dp_core`) →
 images need `build-essential` + `git`, local needs Xcode CLT. **LASER3 can't

@@ -23,10 +23,13 @@ it installs cleanly on macOS / Python 3.12+.
 **Important for Kurdish:** Bertalign's bundled language detector and sentence
 splitter only cover ~25 European languages, so Kurdish would be mislabelled and
 mis-split. LaBSE itself is fully multilingual and embeds Kurdish fine — the only
-weak spot is **sentence segmentation**. So we segment ourselves (Turkish
-splitter as a proxy for the Latin-script Kurdish variants) and pass
-`is_split=True`, leaving Bertalign to do only embedding + alignment. See
-`kurdish_parallel_tools_comparison/align.py:split_sentences`.
+weak spot is **sentence segmentation**. So we segment ourselves with
+[wtpsplit](https://github.com/segment-any-text/wtpsplit)'s **SaT** (`sat-12l-sm`),
+a neural multilingual segmenter that is language-agnostic and handles Kurdish in
+both Latin and Arabic script, then pass `is_split=True`, leaving Bertalign to do
+only embedding + alignment. Segmentation is a **single shared step** — every
+tool/embedding aligns the identical sentence lists. See
+`kurdish_parallel_tools_comparison/align.py:split_sentences` and `prepare_theses`.
 
 ## Layout
 
@@ -159,8 +162,9 @@ external gold set rather than a self-reported similarity.
 
 ## Quality notes
 
-- Kurmanji is split with the **Turkish** splitter (closest Latin-script proxy).
-  Watch for abbreviations (`vb.`, `h.d.`) causing bad splits. The upgrade is
-  Bertalign's optional `sat` extra (neural multilingual splitter).
+- All languages are split with wtpsplit **SaT** (`sat-12l-sm`), a neural
+  multilingual segmenter — language-agnostic, so Kurmanji/Zazaki (Latin) and
+  ckb (Arabic script) no longer rely on a Turkish-splitter proxy or a regex.
+  (We moved up from `sat-3l-sm`, which over-split some Kurmanji sentences.)
 - `eng_Latn` has the widest coverage (394 abstracts), `tur_Latn` next (365),
   Kurmanji abstracts ~361.
