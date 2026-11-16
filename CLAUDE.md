@@ -25,9 +25,17 @@ only know ~25 European languages — **Kurdish is not among them**. But LaBSE
 embeds Kurdish fine. So:
 
 - We **pre-split sentences ourselves** and call `Bertalign(..., is_split=True)`.
-- Kurdish (Latin) is split with the **Turkish** sentence-splitter as a proxy;
-  `*_Arab` keys use a regex fallback. See
-  `kurdish_parallel_tools_comparison/align.py:split_sentences` and `SPLITTER_LANG`.
+- All languages are split with **wtpsplit SaT** (`sat-12l-sm`), a neural
+  multilingual segmenter that is language-agnostic — it covers Kurdish in both
+  Latin and Arabic script, so there is no Turkish-proxy and no `*_Arab` regex
+  fallback any more. See `kurdish_parallel_tools_comparison/align.py:split_sentences`,
+  `get_sat_model`, and `SAT_MODEL_NAME`.
+- Segmentation is a **single shared step**: `align.py:prepare_theses` splits each
+  thesis once and every tool/embedding aligns the *identical* sentence lists
+  (the Modal run does this once in `segment_remote` and ships the result to all
+  three alignment images). Each returned sentence has its whitespace collapsed
+  (`_clean_sentence`), which also keeps bertalign's `is_split=True` round-trip
+  (`"\n".join(sents)` → `splitlines()`) exact.
 - This means language detection quality is irrelevant to results — only
   segmentation matters.
 
@@ -38,9 +46,11 @@ orchestration sits outside it (in `modal_app/`, which imports the package).
 
 | Module | Holds |
 |---|---|
-| `kurdish_parallel_tools_comparison/align.py` | Data load (`load_rows`, `get_summary`), segmentation (`split_sentences`, `SPLITTER_LANG`), `resolve_device`, and the CLI `main`. Re-exports the aligners so `import kurdish_parallel_tools_comparison.align as A` still exposes everything. |
-| `kurdish_parallel_tools_comparison/tools/tools.py` | Alignment algorithms (`align_bertalign`, `align_vecalign`) + `align_pair` dispatch + `TOOLS`. |
+| `kurdish_parallel_tools_comparison/align.py` | Data load (`load_rows`, `get_summary`), the single shared segmentation step (`split_sentences`, `get_sat_model`, `prepare_theses`), `resolve_device`, and the CLI `main`. Re-exports the aligners so `import kurdish_parallel_tools_comparison.align as A` still exposes everything. |
+| `kurdish_parallel_tools_comparison/tools/tools.py` | Alignment algorithms (`align_bertalign`, `align_vecalign`, `align_sentalign`) + `align_pair` dispatch + `TOOLS`. |
+| `kurdish_parallel_tools_comparison/tools/_sentalign_core.py` | SentAlign's pure-Python grid-DP core, **vendored unmodified** from `steinst/SentAlign` (`align_anchors.py`, Apache-2.0). Called in-process by `align_sentalign`; no Cython/Gale-Church anchoring (not needed at abstract size). |
 | `kurdish_parallel_tools_comparison/tools/embeddings.py` | Embed fns (`labse_embed_fn`, `sonar_embed_fn`, `_sonar_pipeline`) + `EMBEDS`. |
+| `kurdish_parallel_tools_comparison/scoring.py` | Scores outputs vs `gold_set.json` (precision/recall/F1). **Pure stdlib — no Modal, no torch** (verified: importing it pulls in no heavy modules), so the comparison layer is fully decoupled. `compare`/`compare_records` + the CLI `main`. |
 
 `align.py` is the single source of truth for the data/CLI layer; the Modal app
 imports the package rather than duplicating logic. `align.py` uses package
@@ -54,6 +64,12 @@ tgt_sents, src_lang, tgt_lang)` dispatches to:
 
 - `align_bertalign` — `Bertalign(..., is_split=True, model=encoder)`. LaBSE-only
   (Bertalign wraps sentence-transformers); `--embed` must be `labse`.
+- `align_sentalign` — SentAlign's grid-DP core (`_sentalign_core.align_anchors`)
+  run **in-process** on a single block `((-1,-1),(n_src,n_tgt))`, which is how
+  SentAlign aligns any document small enough to skip Gale-Church anchoring (all
+  our ~14-sentence abstracts). Builds the exact concatenation→vector dicts the DP
+  looks up from `labse_embed_fn` (L2-normalized, so the DP's dot product is
+  cosine). LaBSE-only, like Bertalign; `--embed` must be `labse`.
 - `align_vecalign` — drives vecalign's own DP (`vecalign.dp_utils.vecalign`)
   **in-process**: build unique overlap lines (`yield_overlaps`), embed them,
   `make_doc_embedding`, then `vecalign(...)`. No temp files, no subprocess.
@@ -76,27 +92,34 @@ bertalign); `--embed sonar` loads no LaBSE at all.
 All aligners return the same `list[(src_text, tgt_text)]`. Keep that contract if
 you add a tool.
 
-### SentAlign is deliberately NOT used
+### SentAlign (vendored DP core, not the pip package)
 
-SentAlign (Steingrímsson et al., 2023) was evaluated and **intentionally left
-out** of the comparison — do not re-add it without a reason:
+SentAlign (Steingrímsson et al., 2023) **is** in the comparison as the
+`sentalign` tool — it's a third LaBSE aligner whose *DP algorithm* differs from
+Bertalign and vecalign (length-penalty scoring + null/merge re-evaluation). It
+adds no new embedding signal (it's LaBSE, like Bertalign), so it tests whether a
+different DP over the same LaBSE vectors helps Kurdish; the embedding axis is
+still carried by SONAR and LASER.
 
-1. **No embedding diversity.** SentAlign is LaBSE-based, exactly like Bertalign.
-   The point of the comparison is to vary the *embedding* (LaBSE vs SONAR) for a
-   low-resource language; a second LaBSE aligner adds a DP variant but no new
-   embedding signal, so it can't move the needle on the question we care about.
-2. **Not installable here.** It is git-only and pinned to Python 3.8 /
-   transformers 4.22.2 / numpy 1.22.1, which will not coexist with our
-   Python 3.13 + torch 2.x, and its entrypoint isn't importable (argparse + file
-   I/O at import). The only clean path would be vendoring its pure-Python DP
-   core, which — given point 1 — isn't worth the maintenance.
+We do **not** install the pip/git package: it pins Python 3.8 / transformers
+4.22.2 / numpy 1.22.1 (won't coexist with our Python 3.13 + torch 2.x) and its
+entrypoint does argparse + file I/O at import. Instead we **vendor its
+pure-Python core** (`_sentalign_core.py`, copied unmodified from `align_anchors.py`)
+and call `align_anchors` directly. Its Cython anchoring / Gale-Church modules are
+not vendored and not needed at abstract size. Keep `_sentalign_core.py`
+byte-for-byte as upstream (only the header comment is ours); put any adaptation
+in `align_sentalign`.
 
-If embedding diversity ever matters more than install cost, the thing to add is
-a *different embedding*, not another LaBSE aligner.
+### Four Modal images (don't merge them)
 
-### Three Modal images (don't merge them)
-
+- `seg_image`: **wtpsplit SaT only**, on CPU. The single shared segmentation
+  step (`segment_remote` → `align.prepare_theses`): it splits the `n` theses
+  once and the result is handed to the three alignment images, so SaT never has
+  to coexist with bertalign / fairseq2 / fairseq-v1, and no alignment image
+  re-splits. The SaT model caches on the volume via `HF_HOME`.
 - `labse_image`: bertalign (`Python>=3.12`) + vecalign + sentence-transformers.
+  Also runs `sentalign` (pure-Python `_sentalign_core`, no extra deps). The three
+  LaBSE tools share one container so LaBSE loads once.
 - `sonar_image`: vecalign + `sonar-space` (fairseq2) + sentence-transformers,
   **no bertalign**. SONAR's fairseq2 asset cache goes to the volume via
   `XDG_CACHE_HOME`.
@@ -110,9 +133,16 @@ a *different embedding*, not another LaBSE aligner.
   (fairseq v1 needs `numpy<1.24`; s-t 2.2.2 needs `huggingface-hub<0.26`); don't
   bump them casually.
 
-The entrypoint dispatches `--embed sonar` → `align_sonar_remote`, `--embed
-laser` → `align_laser_remote`, everything else → `align_labse_remote`; all call
-the shared `_run_alignment`.
+The entrypoint `main(n, gpu, device)` first runs `segment_remote` **once**
+(blocking) to segment the `n` theses, then **spawns the three alignment images
+at once** and waits on them concurrently, passing each the shared `prepared`
+sentence lists: `align_labse_remote` (runs bertalign + vecalign + sentalign),
+`align_sonar_remote` (vecalign/sonar), `align_laser_remote` (vecalign/laser) —
+five options total. All call the shared `_run_alignment`, which takes
+`(prepared, src, device, runs)` — `runs: list[(tool, embed)]` — and aligns the
+identical pre-segmented theses, returning one result dict per run. It no longer
+loads the dataset or splits anything. One image failing (laser is the fragile
+one) is caught per-image so the others still write their output.
 
 Installs: vecalign from git (`@main`) compiles a Cython extension (`dp_core`) →
 images need `build-essential` + `git`, local needs Xcode CLT. **LASER3 can't
@@ -132,15 +162,24 @@ pipenv run python -m kurdish_parallel_tools_comparison.align --n 3   # kmr_Latn 
   `--n` is required unless `--is-full` is passed (full subset, ignores `--n`).
   Source is fixed (`SRC_LANG = kmr_Latn`) and every other summary language
   (`TARGET_LANGS`) is a target; device is always `resolve_device("auto")`. (No
-  `--src/--tgt/--device/--out` — removed; outputs always go to `results/`.)
+  `--src/--tgt/--device/--out` — removed; outputs always go to `data/`.)
 
-Modal smoke test (recommended; no local torch, runs on a GPU, both pairs):
+Modal comparison run (recommended; no local torch, runs on a GPU, both pairs).
+**One command runs all five options concurrently on the same `n` theses** — the
+pool you then hand-annotate into a gold set and score each option against:
 ```bash
-modal run modal_app/app.py --n 3
+modal run modal_app/app.py --n 20
 ```
 - One `local_entrypoint` (`main`), so no `::name` needed.
+- **`--n` is REQUIRED** (must be ≥ 1) and is the number of theses **each** option
+  aligns — not a total split across options. Every option aligns the identical
+  `n` theses with identical segmentation, so the comparison is deterministic.
+  There is no `--tool`/`--embed` (removed) and no full-subset mode here: all five
+  options always run. Writes one file per option; a failing image is reported but
+  doesn't abort the rest.
 - Source/targets are **fixed** in the app (`SRC_LANG`, `TARGET_LANGS`); the CLI
-  only takes `--n`, `--gpu`, `--device`.
+  only takes `--n`, `--gpu`, `--device`. `--gpu` drives every option and defaults
+  to `T4` (LASER3 needs it; an L4 won't work with its torch 1.13).
 - `modal` lives in the user's project virtualenvs, not on the system Python
   (Homebrew Python blocks `pip install` via PEP 668). It is installed in THIS
   project's pipenv venv (`kurdish_parallel_tools_comparison-*`), so `modal run …` works with the
@@ -148,18 +187,71 @@ modal run modal_app/app.py --n 3
   `~/.local/share/virtualenvs/sorjin-modal-ZLvY6A0z/bin/modal`. Token at
   `~/.modal.toml` (already configured).
 
+## Scoring (gold set, precision/recall/F1)
+
+Alignments have **no intrinsic score**; quality is judged against the
+hand-annotated `gold_set.json`. `kurdish_parallel_tools_comparison/scoring.py` is the comparison
+layer and is **decoupled from Modal** (pure stdlib — no torch/modal import), so
+it runs the same way local or remote:
+
+```bash
+python -m kurdish_parallel_tools_comparison.scoring --n 20            # scores data/{sat}/{option}_20.jsonl
+python -m kurdish_parallel_tools_comparison.scoring --n 20 --verbose  # + per-target (tur/eng) breakdown
+modal run modal_app/score_app.py --n 20              # same metrics, on a CPU Modal container
+```
+
+- **`--n`** picks the run to score (`{option}_{n}.jsonl`); `--suffix full` scores
+  the `*_full.jsonl` set instead. Prints a ranked table and writes
+  `data/{SAT_MODEL_NAME}/scores_{n}.json` (`--no-write` skips the file).
+- **`gold_set.json`** (repo root): a list of theses, each with 0-based
+  sentence-index `links` per `tgt_lang` — the **same indices** the Modal
+  `result_{n}.json` prints via `numbered(sents)`. Shape:
+  `{"tez_id", "alignments": [{"tgt_lang", "links": [{"src": [i...], "tgt": [j...]}]}]}`.
+- **Partial gold is fine and expected.** An alignment with empty `links` (or empty
+  `tgt_lang`) is treated as *not yet annotated* and **skipped** — scoring it would
+  count every predicted link as a false positive and crater precision. Only
+  (thesis, target) pairs present in both the gold set and a prediction are scored.
+- **Reconstruction:** aligners emit text beads, so `scoring.reconstruct_beads`
+  recovers each bead's 0-based index sets from `pairs` + `src_sents`/`tgt_sents`
+  (global contiguous-window match; handles SentAlign's occasional overlapping
+  beads). If a record ever carries an explicit `links` field, that is used
+  directly — so the scorer keeps working if the aligners start emitting indices.
+- **Metrics** are micro-averaged (links pooled across theses), in two
+  granularities: **lax** (headline) expands each bead to its sentence-link cross
+  product so partial overlaps get partial credit; **strict** requires an exact
+  bead match (same src AND tgt index sets). Null beads (one side empty) contribute
+  no links and are excluded from both.
+- **`modal_app/score_app.py`** is a thin wrapper: a torch-free slim image ships
+  the package and `score_remote` just calls `scoring.compare_records`. All metric
+  logic stays in `scoring.py`; the Modal boundary only moves data. Its
+  `local_entrypoint` reads the local `gold_set.json` + JSONL files and ships the
+  parsed records to the container (the alignment run writes outputs locally, so
+  there is nothing on the Volume to read).
+
 ## Conventions
 
-- Output files go in `results/`.
+- Output files go in `data/{SAT_MODEL_NAME}/` (nested under the SaT model used
+  to segment, so different segmenters' runs don't collide).
   - Local CLI: `{tool}_{embed}_{n}.jsonl`, or `{tool}_{embed}_full.jsonl` with
     `--is-full`. Source is fixed (kmr_Latn) and all targets go in one file,
     so src/tgt are no longer in the name. NOTE: the `…_full.jsonl` form matches
     the Modal full name — local covers all `TARGET_LANGS`, Modal only tur+eng, so
-    don't mix them in the same `results/`.
-  - Modal smoke test: `{tool}_{embed}_smoke_{n}.jsonl` when `--n` > 0, else
-    `{tool}_{embed}_full.jsonl` (one record per thesis-and-target). `--n 0` /
-    omitted means the full subset. (`embed` is in the name so vecalign/labse and
-    vecalign/laser don't collide.)
+    don't mix them in the same `data/`.
+  - Modal comparison run: `{tool}_{embed}_{n}.jsonl`, one file per option (five
+    files: `bertalign_labse_`, `vecalign_labse_`, `sentalign_labse_`,
+    `vecalign_sonar_`, `vecalign_laser_`), one record per thesis-and-target.
+    `tool` and `embed` are both in the name so the five never collide. These are
+    tur+eng only; the local files share the same `{tool}_{embed}_{n}.jsonl` form
+    but cover all targets — keep them straight.
+  - Also `result_{n}.json`: the (thesis, target) pairs whose alignment **differs
+    across ≥ 2 options**, each with the options grouped by identical alignment —
+    the shortlist to hand-annotate for the gold set. The entrypoint prints only a
+    short summary (per-option record counts + how many pairs differ); the detail
+    lives in these files.
+  - Also `scores_{n}.json` (or `scores_full.json`): the scoring report —
+    per-option micro-averaged precision/recall/F1 (lax + strict) against
+    `gold_set.json`, plus a per-target breakdown. Written by
+    `kurdish_parallel_tools_comparison.scoring` / `modal_app/score_app.py`; see the Scoring section.
 - Device: `resolve_device("auto")` → MPS on Apple Silicon, CUDA on a Modal GPU,
   else CPU. The LaBSE encoder is loaded **once** and reused across summaries.
 - The Modal image caches HF downloads on a Volume (`HF_HOME` → `/cache`); call

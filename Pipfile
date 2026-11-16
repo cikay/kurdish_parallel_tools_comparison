@@ -4,11 +4,15 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-# Maintained fork of bfsujason/bertalign: LaBSE embeddings, no faiss-gpu,
-# offline language detection (lingua), sentence-splitter segmentation.
-# Pulls in torch, sentence-transformers, numba, numpy, sentence-splitter,
-# lingua-language-detector.
+# Maintained fork of bfsujason/bertalign: LaBSE embeddings, no faiss-gpu.
+# Pulls in torch, sentence-transformers, numba, numpy. We pre-split sentences
+# ourselves and pass is_split=True, so bertalign's own lingua/sentence-splitter
+# segmentation is bypassed (we use wtpsplit SaT instead; see below).
 bertalign = "==2.0.1"
+# Neural multilingual sentence segmenter (SaT). Language-agnostic, so it covers
+# Kurdish (Latin and Arabic script), for which no dedicated splitter exists.
+# Used by align.split_sentences / prepare_theses -- the single segmentation step.
+wtpsplit = "==2.2.2"
 # Vecalign 2.0 (pip-installable from git; builds a Cython extension, so a C
 # compiler / Xcode command line tools are needed locally).
 vecalign = {git = "https://github.com/thompsonb/vecalign.git", ref = "main"}
@@ -18,6 +22,10 @@ vecalign = {git = "https://github.com/thompsonb/vecalign.git", ref = "main"}
 pandas = "*"
 pyarrow = "*"
 huggingface-hub = "*"
+# Orchestrates the remote GPU run (`modal run modal_app/app.py`). Not imported by
+# the package -- only the local entrypoint uses it -- but installed here so
+# `modal run ...` works with this venv active.
+modal = "*"
 
 [requires]
 python_version = "3.13"

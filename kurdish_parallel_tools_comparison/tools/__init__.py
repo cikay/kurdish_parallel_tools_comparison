@@ -20,6 +20,7 @@ from .tools import (
     TOOLS,
     align_bertalign,
     align_pair,
+    align_sentalign,
     align_vecalign,
 )
 
@@ -28,6 +29,7 @@ __all__ = [
     "TOOLS",
     "align_bertalign",
     "align_pair",
+    "align_sentalign",
     "align_vecalign",
     "labse_embed_fn",
     "laser_embed_fn",
