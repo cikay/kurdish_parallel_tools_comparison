@@ -24,8 +24,9 @@ dist/
 .coverage
 htmlcov/
 
-# Generated alignment outputs
-data/
+# Alignment/scoring outputs are committed as the comparison record, but keep
+# throwaway backups (e.g. scores_20_old.json) out of the repo.
+data/**/*_old.json
 # Caches
 .cache/
 .mypy_cache/

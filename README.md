@@ -40,7 +40,10 @@ tool/embedding aligns the identical sentence lists. See
 | `kurdish_parallel_tools_comparison/tools/tools.py` | Alignment algorithms (Bertalign, Vecalign, SentAlign) + `align_pair` dispatch. |
 | `kurdish_parallel_tools_comparison/tools/_sentalign_core.py` | SentAlign's grid-DP core, vendored unmodified from `steinst/SentAlign` (Apache-2.0). |
 | `kurdish_parallel_tools_comparison/tools/embeddings.py` | Embedding models (LaBSE, SONAR, LASER3). |
+| `kurdish_parallel_tools_comparison/scoring.py` | Scores the outputs against `gold_set.json` (precision/recall/F1). Pure stdlib, no Modal/torch. |
 | `modal_app/app.py` | Modal run — runs all five options on a GPU, no local torch. Imports the package. |
+| `modal_app/score_app.py` | Thin Modal wrapper around `scoring.py` (same metrics, on Modal). |
+| `gold_set.json` | Hand-annotated gold alignments (0-based sentence-index links) to score against. |
 | `Pipfile` | Local dependencies (bertalign, vecalign, pandas, pyarrow, huggingface-hub). |
 | `data/{sat_model}/` | Output JSONL files, nested under the SaT model used to segment. |
 
@@ -155,10 +158,56 @@ Each JSONL record:
 A `pair` with an empty `src` or `tgt` is an insertion/deletion (a sentence on
 one side with no counterpart).
 
-### Evaluating alignment quality
+## Scoring against the gold set
 
-Records carry no intrinsic score. Alignment quality is evaluated against an
-external gold set rather than a self-reported similarity.
+Records carry no intrinsic score — quality is judged against a hand-annotated
+gold set (`gold_set.json`) with **precision / recall / F1**. Because every option
+aligns the identical segmentation, the comparison is apples-to-apples.
+
+```bash
+# Local (pure stdlib, no torch/Modal needed):
+python -m kurdish_parallel_tools_comparison.scoring --n 20            # scores the *_20.jsonl files
+python -m kurdish_parallel_tools_comparison.scoring --n 20 --verbose  # + per-target (tur/eng) breakdown
+
+# Same metrics, through Modal:
+modal run modal_app/score_app.py --n 20
+```
+
+`--n` selects which run to score (`{option}_{n}.jsonl` under `data/{sat_model}/`).
+The report is printed and written to `data/{sat_model}/scores_{n}.json`; pass
+`--no-write` to skip the file. Scoring logic lives entirely in `scoring.py`
+(decoupled from Modal); `score_app.py` only ships it to a CPU container.
+
+**Gold format** — a list of theses, each with 0-based sentence-index links per
+target language (the same indices `result_{n}.json` prints via `numbered(sents)`):
+
+```json
+[{"tez_id": "1003999",
+  "alignments": [{"tgt_lang": "tur_Latn",
+                  "links": [{"src": [0], "tgt": [0]},
+                            {"src": [1], "tgt": [1, 2]}]}]}]
+```
+
+The gold set can be **partial**: an entry with empty `links` (or empty
+`tgt_lang`) is treated as not-yet-annotated and skipped, and only (thesis,
+target) pairs present in both the gold set and a prediction file are scored. So a
+half-finished gold set still gives a fair comparison over what it does cover.
+
+**How predictions are scored** — the aligners emit text beads; the scorer
+reconstructs each bead's 0-based sentence-index sets from `pairs` +
+`src_sents`/`tgt_sents` (or uses an explicit `links` field if a record carries
+one). Metrics are **micro-averaged** (links pooled across theses) in two
+granularities:
+
+- **lax** (headline) — each bead is expanded into its sentence-to-sentence links
+  (the cross product of its index sets); partial overlaps get partial credit. A
+  gold `[3] → [4,5]` becomes links `(3,4)` and `(3,5)`, so a prediction that gets
+  only `[3] → [4]` still scores the `(3,4)` link.
+- **strict** — a predicted bead counts only if it matches a gold bead exactly
+  (same src *and* tgt index sets). All-or-nothing per bead.
+
+Null beads (one side empty — an insertion/deletion) contribute no links and are
+excluded from both metrics, since the gold set annotates only real alignments.
 
 ## Quality notes
 

@@ -50,6 +50,7 @@ orchestration sits outside it (in `modal_app/`, which imports the package).
 | `kurdish_parallel_tools_comparison/tools/tools.py` | Alignment algorithms (`align_bertalign`, `align_vecalign`, `align_sentalign`) + `align_pair` dispatch + `TOOLS`. |
 | `kurdish_parallel_tools_comparison/tools/_sentalign_core.py` | SentAlign's pure-Python grid-DP core, **vendored unmodified** from `steinst/SentAlign` (`align_anchors.py`, Apache-2.0). Called in-process by `align_sentalign`; no Cython/Gale-Church anchoring (not needed at abstract size). |
 | `kurdish_parallel_tools_comparison/tools/embeddings.py` | Embed fns (`labse_embed_fn`, `sonar_embed_fn`, `_sonar_pipeline`) + `EMBEDS`. |
+| `kurdish_parallel_tools_comparison/scoring.py` | Scores outputs vs `gold_set.json` (precision/recall/F1). **Pure stdlib — no Modal, no torch** (verified: importing it pulls in no heavy modules), so the comparison layer is fully decoupled. `compare`/`compare_records` + the CLI `main`. |
 
 `align.py` is the single source of truth for the data/CLI layer; the Modal app
 imports the package rather than duplicating logic. `align.py` uses package
@@ -186,6 +187,47 @@ modal run modal_app/app.py --n 20
   `~/.local/share/virtualenvs/sorjin-modal-ZLvY6A0z/bin/modal`. Token at
   `~/.modal.toml` (already configured).
 
+## Scoring (gold set, precision/recall/F1)
+
+Alignments have **no intrinsic score**; quality is judged against the
+hand-annotated `gold_set.json`. `kurdish_parallel_tools_comparison/scoring.py` is the comparison
+layer and is **decoupled from Modal** (pure stdlib — no torch/modal import), so
+it runs the same way local or remote:
+
+```bash
+python -m kurdish_parallel_tools_comparison.scoring --n 20            # scores data/{sat}/{option}_20.jsonl
+python -m kurdish_parallel_tools_comparison.scoring --n 20 --verbose  # + per-target (tur/eng) breakdown
+modal run modal_app/score_app.py --n 20              # same metrics, on a CPU Modal container
+```
+
+- **`--n`** picks the run to score (`{option}_{n}.jsonl`); `--suffix full` scores
+  the `*_full.jsonl` set instead. Prints a ranked table and writes
+  `data/{SAT_MODEL_NAME}/scores_{n}.json` (`--no-write` skips the file).
+- **`gold_set.json`** (repo root): a list of theses, each with 0-based
+  sentence-index `links` per `tgt_lang` — the **same indices** the Modal
+  `result_{n}.json` prints via `numbered(sents)`. Shape:
+  `{"tez_id", "alignments": [{"tgt_lang", "links": [{"src": [i...], "tgt": [j...]}]}]}`.
+- **Partial gold is fine and expected.** An alignment with empty `links` (or empty
+  `tgt_lang`) is treated as *not yet annotated* and **skipped** — scoring it would
+  count every predicted link as a false positive and crater precision. Only
+  (thesis, target) pairs present in both the gold set and a prediction are scored.
+- **Reconstruction:** aligners emit text beads, so `scoring.reconstruct_beads`
+  recovers each bead's 0-based index sets from `pairs` + `src_sents`/`tgt_sents`
+  (global contiguous-window match; handles SentAlign's occasional overlapping
+  beads). If a record ever carries an explicit `links` field, that is used
+  directly — so the scorer keeps working if the aligners start emitting indices.
+- **Metrics** are micro-averaged (links pooled across theses), in two
+  granularities: **lax** (headline) expands each bead to its sentence-link cross
+  product so partial overlaps get partial credit; **strict** requires an exact
+  bead match (same src AND tgt index sets). Null beads (one side empty) contribute
+  no links and are excluded from both.
+- **`modal_app/score_app.py`** is a thin wrapper: a torch-free slim image ships
+  the package and `score_remote` just calls `scoring.compare_records`. All metric
+  logic stays in `scoring.py`; the Modal boundary only moves data. Its
+  `local_entrypoint` reads the local `gold_set.json` + JSONL files and ships the
+  parsed records to the container (the alignment run writes outputs locally, so
+  there is nothing on the Volume to read).
+
 ## Conventions
 
 - Output files go in `data/{SAT_MODEL_NAME}/` (nested under the SaT model used
@@ -206,6 +248,10 @@ modal run modal_app/app.py --n 20
     the shortlist to hand-annotate for the gold set. The entrypoint prints only a
     short summary (per-option record counts + how many pairs differ); the detail
     lives in these files.
+  - Also `scores_{n}.json` (or `scores_full.json`): the scoring report —
+    per-option micro-averaged precision/recall/F1 (lax + strict) against
+    `gold_set.json`, plus a per-target breakdown. Written by
+    `kurdish_parallel_tools_comparison.scoring` / `modal_app/score_app.py`; see the Scoring section.
 - Device: `resolve_device("auto")` → MPS on Apple Silicon, CUDA on a Modal GPU,
   else CPU. The LaBSE encoder is loaded **once** and reused across summaries.
 - The Modal image caches HF downloads on a Volume (`HF_HOME` → `/cache`); call

@@ -530,7 +530,7 @@
         "alignments": [
             {
                 "tgt_lang": "tur_Latn",
-                "alignments": [
+                "links": [
                     {
                         "src": [0],
                         "tgt": [0]
@@ -591,7 +591,7 @@
             },
             {
                 "tgt_lang": "eng_Latn",
-                "alignments": [
+                "links": [
                     {
                         "src": [0],
                         "tgt": [0]
@@ -657,7 +657,7 @@
         "alignments": [
             {
                 "tgt_lang": "tur_Latn",
-                "alignments": [
+                "links": [
                     {
                         "src": [0],
                         "tgt": [0]
@@ -742,7 +742,7 @@
             },
             {
                 "tgt_lang": "eng_Latn",
-                "alignments": [
+                "links": [
                     {
                         "src": [0],
                         "tgt": [0]
@@ -828,7 +828,7 @@
         "alignments": [
             {
                 "tgt_lang": "",
-                "alignments": [
+                "links": [
                     {
                         "src": [0],
                         "tgt": []
@@ -890,7 +890,7 @@
         "alignments": [
             {
                 "tgt_lang": "tur_Latn",
-                "alignments": [
+                "links": [
                     {
                         "src": [
                             0
@@ -999,7 +999,7 @@
             },
             {
                 "tgt_lang": "eng_Latn",
-                "alignments": [
+                "links": [
                     {
                         "src": [0],
                         "tgt": [0]
@@ -1062,7 +1062,7 @@
         "alignments": [
             {
                 "tgt_lang": "tur_Latn",
-                "alignments": [
+                "links": [
                     {
                         "src": [0],
                         "tgt": []
@@ -1171,7 +1171,7 @@
             },
             {
                 "tgt_lang": "eng_Latn",
-                "alignments": [
+                "links": [
                     {
                         "src": [0],
                         "tgt": []
