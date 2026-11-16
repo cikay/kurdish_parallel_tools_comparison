@@ -71,10 +71,10 @@ model. The comparison runs **five** tool/embed options:
 
 So the five options are: `bertalign/labse`, `sentalign/labse`, `vecalign/labse`,
 `vecalign/sonar`, `vecalign/laser`. Bertalign and SentAlign vary the *DP* over
-the same LaBSE vectors; SONAR and LASER vary the *embedding*. The embedding model
-matters more than the DP for a low-resource language, so `vecalign --embed sonar`
-is expected to be the strongest setup for Kurdish. Alignments are not scored
-intrinsically; quality is judged against an external gold set.
+the same LaBSE vectors; SONAR and LASER vary the *embedding*, so the comparison
+separates the effect of the alignment algorithm from the effect of the embedding.
+Alignments are not scored intrinsically; quality is judged against an external
+gold set (see the results below).
 
 ## Run it on Modal (recommended)
 
@@ -230,10 +230,9 @@ Reading this (small gold set — treat as directional, not final):
   is a cleaner dependency, sentalign is vendored core you own).
 - Swapping the **embedding** under vecalign (SONAR, LASER) did **not** help here:
   both land at or below `vecalign_labse`. So on tur/eng the *DP* matters more than
-  the embedding. This runs against the prior hypothesis that `vecalign --embed
-  sonar` would be strongest for Kurdish — but the gold set covers only tur_Latn
-  and eng_Latn, and SONAR/LASER's dedicated Kurdish coverage is most likely to pay
-  off on **ckb_Arab / zza_Latn**, which aren't annotated yet.
+  the embedding. The gold set covers only tur_Latn and eng_Latn, though, and
+  SONAR/LASER's dedicated Kurdish coverage is most likely to pay off on
+  **ckb_Arab / zza_Latn**, which aren't annotated yet.
 - Numbers will move as the gold set grows; re-run the scorer to refresh them.
 
 ## Quality notes
