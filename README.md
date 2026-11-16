@@ -209,6 +209,33 @@ granularities:
 Null beads (one side empty — an insertion/deletion) contribute no links and are
 excluded from both metrics, since the gold set annotates only real alignments.
 
+### Current results (`--n 20`, gold = 9 theses / 17 thesis-target pairs)
+
+Micro-averaged over the annotated pairs (9 `tur_Latn` + 8 `eng_Latn`), ranked by
+lax F1:
+
+| option | lax P | lax R | **lax F1** | strict P | strict R | strict F1 |
+|---|---|---|---|---|---|---|
+| **bertalign_labse** | 0.940 | 0.984 | **0.961** | 0.942 | 0.939 | 0.940 |
+| sentalign_labse | 0.961 | 0.943 | **0.952** | 0.953 | 0.939 | 0.946 |
+| vecalign_labse | 0.910 | 0.959 | **0.934** | 0.885 | 0.889 | 0.887 |
+| vecalign_sonar | 0.925 | 0.940 | **0.932** | 0.876 | 0.897 | 0.886 |
+| vecalign_laser | 0.915 | 0.924 | **0.920** | 0.852 | 0.885 | 0.868 |
+
+Reading this (small gold set — treat as directional, not final):
+
+- The two **LaBSE grid-DP** tools (bertalign, sentalign) lead. Their gap is
+  within noise at this size — bertalign edges lax F1, sentalign edges strict F1 —
+  so they're effectively tied; pick between them on secondary criteria (bertalign
+  is a cleaner dependency, sentalign is vendored core you own).
+- Swapping the **embedding** under vecalign (SONAR, LASER) did **not** help here:
+  both land at or below `vecalign_labse`. So on tur/eng the *DP* matters more than
+  the embedding. This runs against the prior hypothesis that `vecalign --embed
+  sonar` would be strongest for Kurdish — but the gold set covers only tur_Latn
+  and eng_Latn, and SONAR/LASER's dedicated Kurdish coverage is most likely to pay
+  off on **ckb_Arab / zza_Latn**, which aren't annotated yet.
+- Numbers will move as the gold set grows; re-run the scorer to refresh them.
+
 ## Quality notes
 
 - All languages are split with wtpsplit **SaT** (`sat-12l-sm`), a neural
